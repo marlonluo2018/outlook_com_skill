@@ -1,5 +1,5 @@
 ---
-name: outlook-com-skill
+name: outlook_com_skill
 description: Microsoft Outlook email management - search, list, compose, reply, forward, download attachments, thread tracking
 triggers: [
   "check email", "check inbox", "any new emails", "what's new",
@@ -139,10 +139,10 @@ The **safe execution method** is either Python inline Base64 or `--body-file` to
 
 ```bash
 # Method 1 (Preferred): Python inline Base64
-py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Thank you for the update.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py', 'reply', '<email_id>', '--body-base64', b64, '--cc', 'extra@ibm.com', '--attach', 'C:/path/file.pdf']))"
+py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Thank you for the update.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'reply', '<email_id>', '--body-base64', b64, '--cc', 'extra@ibm.com', '--attach', 'C:/path/file.pdf']))"
 
 # Method 2: Temporary body file
-py -3 assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py reply "<email_id>" --body-file "downloads/body.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<email_id>" --body-file "downloads/body.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
 ```
 
 - **Default: reply-all** — keeps ALL original To + CC recipients. `--to`/`--cc` APPEND to existing.
@@ -157,10 +157,10 @@ py -3 assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py reply "<
 
 ```bash
 # Method 1 (Preferred): Python inline Base64
-py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Message text.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py', 'compose', '--to', 'email@ibm.com', '--subject', 'text', '--body-base64', b64, '--attach', 'C:/path/file.pdf']))"
+py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Message text.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'compose', '--to', 'email@ibm.com', '--subject', 'text', '--body-base64', b64, '--attach', 'C:/path/file.pdf']))"
 
 # Method 2: Temporary body file
-py -3 assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "downloads/body.html" --attach "C:/path/file.pdf"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "downloads/body.html" --attach "C:/path/file.pdf"
 ```
 
 - `--attach`: File path(s) to attach (comma separated for multiple)
@@ -412,14 +412,14 @@ class BatchConfig:
 Encode the body directly in Python and pass to `outlook_skill.py` via `--body-base64` in a single command, without going through Bash/PowerShell variable interpolation:
 
 ```bash
-py -3 -c "import base64, subprocess, sys; body = '''<p>Hello team,</p><p>The cost is $60 USD.</p>'''; b64 = base64.b64encode(body.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py', 'reply', '<entry_id>', '--body-base64', b64]))"
+py -3 -c "import base64, subprocess, sys; body = '''<p>Hello team,</p><p>The cost is $60 USD.</p>'''; b64 = base64.b64encode(body.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'reply', '<entry_id>', '--body-base64', b64]))"
 ```
 
 #### Method 2 (Safe Body File via `--body-file`):
 Write the body text to a temporary file using the assistant's file tools, then pass `--body-file`:
 
 ```bash
-py -3 assistant_brain/skills/outlook-com-skill/scripts/outlook_skill.py reply "<entry_id>" --body-file "downloads/email_body.html"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<entry_id>" --body-file "downloads/email_body.html"
 ```
 
 **FORBIDDEN PATTERNS:**
