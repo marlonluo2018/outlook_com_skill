@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 # Local application imports
 from ..logging_config import get_logger
+from .search_common import BODY_PREVIEW_LENGTH
 
 logger = get_logger(__name__)
 
@@ -286,7 +287,7 @@ def extract_emails_parallel(items: List[Any], max_workers: int = 4) -> List[Dict
                     'UnRead': getattr(item, 'UnRead', False),
                     'MessageClass': getattr(item, 'MessageClass', ''),
                     'MeetingStatus': getattr(item, 'MeetingStatus', 0),
-                    'body_preview': raw_body[:200].strip()
+                    'body_preview': raw_body[:BODY_PREVIEW_LENGTH].strip()
                 }
                 
                 # Extract attachment info with embedded image detection
@@ -492,7 +493,7 @@ def extract_emails_sequential_fallback(items: List[Any]) -> List[Dict[str, Any]]
             body_preview = ""
             try:
                 raw_body = getattr(item, 'Body', '') or ''
-                body_preview = raw_body[:200].strip()
+                body_preview = raw_body[:BODY_PREVIEW_LENGTH].strip()
             except Exception:
                 pass
 
@@ -566,6 +567,7 @@ def extract_emails_lightweight(items: List[Any]) -> List[Dict[str, Any]]:
     for item in items:
         try:
             entry_id = getattr(item, 'EntryID', '') or ''
+            conversation_id = getattr(item, 'ConversationID', '') or ''
             if not entry_id:
                 continue
 
@@ -624,12 +626,13 @@ def extract_emails_lightweight(items: List[Any]) -> List[Dict[str, Any]]:
             body_preview = ""
             try:
                 raw_body = getattr(item, 'Body', '') or ''
-                body_preview = raw_body[:200].strip()
+                body_preview = raw_body[:BODY_PREVIEW_LENGTH].strip()
             except Exception:
                 pass
 
             email_list.append({
                 "entry_id": entry_id,
+                "conversation_id": conversation_id,
                 "subject": subject,
                 "sender": sender,
                 "sender_email": sender_email,

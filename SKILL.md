@@ -12,18 +12,20 @@ triggers: [
   "batch forward", "mass forward", "forward to multiple",
   "get email", "view email", "show email details",
   "download attachment", "save attachment", "get attachment",
-  "lookup contact", "who is",
+  "lookup contact",
   "use as template", "edit email html", "modify email", "create from template",
   "get signature", "view signature", "update signature", "change signature",
   "calendar", "show calendar", "my schedule", "what meetings",
   "accept meeting", "decline meeting", "tentative", "propose new time",
+  "check availability", "check calendar", "free busy", "freebusy", "is available", "check schedule", "find time", "others calendar", "colleague calendar",
 ]
-operations: ["find-recent", "find", "compose", "reply", "forward", "redirect", "batch-forward", "download-attachment", "contact-lookup", "find-thread", "find-related", "get-email", "recall", "get-html", "edit-html", "send-draft", "get-signature", "update-signature", "list-calendar", "respond-meeting"]
+operations: ["find-recent", "find", "compose", "reply", "forward", "redirect", "batch-forward", "download-attachment", "contact-lookup", "find-thread", "find-related", "get-email", "recall", "get-html", "edit-html", "send-draft", "get-signature", "update-signature", "list-calendar", "respond-meeting", "check-availability"]
 ---
 
 # Outlook Skill
 
-> **⚠️ ALL emails use HTML format:** `<p>text</p>`, `<br>`, `<strong>bold</strong>`
+> **⚠️ ALL emails use HTML format:** `<br>` for line breaks (avoid stacked `<p>` — Outlook adds large gaps), `<strong>bold</strong>`
+> **Send commands send immediately.** Run them only after the user approved the draft (Send Flow in `assistant_brain/workflows/EMAIL_WORKFLOW.md`).
 > **⚠️ No closing or signature in email body** — Outlook auto-appends signature. Do not add "Thanks, Marlon" or similar.
 > **Codex execution:** Outlook COM requires the interactive Outlook desktop session. In Codex, run Outlook-backed commands with desktop/elevated execution directly; do not try the background sandbox first.
 
@@ -42,11 +44,13 @@ operations: ["find-recent", "find", "compose", "reply", "forward", "redirect", "
 ### Find Recent Emails
 ```bash
 py -3 scripts/outlook_skill.py find-recent --days 7
+py -3 scripts/outlook_skill.py find-recent --days 7 --json
 ```
 - Default: **Inbox + Sent Items** (searches both folders to capture full context)
 - Shows: To/CC, attachments, body preview, folder indicator (📥/📤)
 - `--days`: 1-365 (default: 7)
 - `--folder`: override to search a single folder only
+- `--json`: stable machine-readable output including both `entry_id` and `conversation_id`
 
 ### Find Emails
 ```bash
@@ -94,7 +98,7 @@ py -3 scripts/outlook_skill.py find-thread "<email_id>" --brief
 py -3 scripts/outlook_skill.py find-related "<email_id>"
 py -3 scripts/outlook_skill.py find-related "<email_id>" --exclude-thread
 py -3 scripts/outlook_skill.py find-related "<email_id>" --strategies recipient,keyword
-py -3 scripts/outlook_skill.py find-related "<email_id>" --max 10 --brief
+py -3 scripts/outlook_skill.py find-related "<email_id>" --limit 10 --brief
 ```
 - **Auto-searches Inbox + Sent Items** — single merged scan per folder (fast)
 - Output includes relevance stars (★) and strategy name per result
@@ -108,7 +112,7 @@ py -3 scripts/outlook_skill.py find-related "<email_id>" --max 10 --brief
 - Results sorted by confidence then time (newest first within same confidence)
 - `--strategies`: comma-separated (default: all four)
 - `--exclude-thread`: skip thread strategy (useful after `find-thread` to avoid duplicates)
-- `--max N`: Limit results returned (default: 20, configurable in config.py)
+- `--limit N`: Limit results returned (default: 20, configurable in config.py)
 - `--brief`: Compact single-line output (still shows email ID)
 
 ### Contact Lookup (Use Before Search by Email)
@@ -124,81 +128,67 @@ py -3 scripts/outlook_skill.py lookup-contact "HONG YANG"
 
 ### Sending Strategy (AI auto-selects — never ask user)
 
-> **⚠️ CRITICAL:** `reply` cannot remove recipients — `--to`/`--cc` only APPEND. If the desired recipient list is SMALLER than the original thread, you MUST use `forward` (keeps thread context) or `compose` (no thread context). Never ask the user which command to use — decide based on recipients.
+`reply` cannot remove recipients — its `--to`/`--cc` only append. Compare the source To/CC (from `get-email`) with the intended list and pick:
 
 | Need | Command |
 | ---- | ------- |
 | Same/more recipients | `reply` |
-| Fewer recipients + thread context needed | `forward` |
-| Fewer recipients + no thread context needed | `compose` with `Re:` subject |
 | Sender only | `reply --only` |
+| Remove or replace some recipients, keep the thread | `redirect` |
+| New audience that needs thread context | `forward` |
+| No thread context needed | `compose` with `Re:` subject |
+
+### Body Transport (all send commands)
+
+Write the HTML body with the Write tool to a new, uniquely named file in `outbox/`, then pass `--body-file`. Never put body text inside a shell command string — Bash/PowerShell expand `$60` etc. before the script sees it. After a successful send the CLI deletes the file (only files inside `outbox/`); on failure it is kept for retry. Use `<br>` for line breaks rather than `<p>` blocks.
 
 ### Reply
 
-The **safe execution method** is either Python inline Base64 or `--body-file` to avoid shell variable interpolation of numbers, currencies, or symbols (like `$60` or `%`).
-
 ```bash
-# Method 1 (Preferred): Python inline Base64
-py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Thank you for the update.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'reply', '<email_id>', '--body-base64', b64, '--cc', 'extra@ibm.com', '--attach', 'C:/path/file.pdf']))"
-
-# Method 2: Temporary body file
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<email_id>" --body-file "downloads/body.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<email_id>" --body-file "outbox/T127-reply-20260924.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
 ```
 
 - **Default: reply-all** — keeps ALL original To + CC recipients. `--to`/`--cc` APPEND to existing.
-- **`--only`: reply to From (sender) only** — use only when user explicitly asks to narrow.
+- **`--only`: reply to From (sender) only** — AI selects this when the response is for the sender alone.
 - `--attach`: File path(s) to attach (comma separated for multiple).
 - `--importance`: Set priority flag (`high` or `low`) — shows ❗ in recipient's inbox.
 - `reply` logs progress steps to stderr for timeout diagnosis.
 - `reply` prints the Sent Items EntryID by default after sending.
-- **⚠️ ALWAYS show draft to user first — NEVER send before user approval**
 
 ### Compose Email
 
 ```bash
-# Method 1 (Preferred): Python inline Base64
-py -3 -c "import base64, subprocess, sys; b64 = base64.b64encode('''<p>Message text.</p>'''.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'compose', '--to', 'email@ibm.com', '--subject', 'text', '--body-base64', b64, '--attach', 'C:/path/file.pdf']))"
-
-# Method 2: Temporary body file
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "downloads/body.html" --attach "C:/path/file.pdf"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "outbox/<name>.html" --attach "C:/path/file.pdf"
 ```
 
 - `--attach`: File path(s) to attach (comma separated for multiple)
 - `--inline-image`: Embed image inline via CID (format: `filepath:cid_name`, comma separated)
 - `--importance`: Set priority flag (`high` or `low`) — shows ❗ in recipient's inbox
-- **⚠️ ALWAYS show draft to user in chat window first — NEVER send before user approval**
-- AI presents the email as readable plain text in chat
-- Only call this command after user explicitly confirms "send" or "approve"
 - Sends immediately when called
 
 ### Forward (single)
 
-```powershell
-$body = "<p>FYI, forwarding this thread.</p>"
-$body64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
-py -3 scripts/outlook_skill.py forward "<email_id>" --to "user1@ibm.com" --cc "manager@ibm.com" --body-base64 $body64
-py -3 scripts/outlook_skill.py forward "<email_id>" --to "user@domain.com" --attach "C:\path\file.pdf"
+```bash
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py forward "<email_id>" --to "user1@ibm.com" --cc "manager@ibm.com" --body-file "outbox/<name>.html"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py forward "<email_id>" --to "user@domain.com" --attach "C:/path/file.pdf"
 ```
 
 - Forwards an email to specified recipients
 - `--to` (required): Comma-separated list of To recipients
 - `--cc` (optional): Comma-separated list of CC recipients
-- `--body-base64` (preferred for send operations): Base64 encoded UTF-8 custom HTML message to prepend. `--body` is acceptable only for short, single-line HTML.
+- `--body-file` (optional): custom HTML message to prepend (see Body Transport)
 - `--attach` (optional): File path(s) to attach (comma separated for multiple)
 - Subject auto-prefixed with `FW:`
 - Preserves original email formatting
-- **⚠️ ALWAYS show draft to user first — NEVER send before user approval**
 
 ### Batch Forward
 
-```powershell
-$message = "<p>HTML body</p>"
-$message64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($message))
-py -3 scripts/outlook_skill.py batch-forward "<email_id>" "recipients.csv" --body-base64 $message64
+```bash
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py batch-forward "<email_id>" "recipients.csv" --body-file "outbox/<name>.html"
 ```
 
 - CSV: single column named "email" (supports BOM encoding)
-- `--body-base64` (preferred for send operations): Optional Base64 encoded UTF-8 HTML message to prepend (same format as reply). `--message-base64` is accepted as an alias. `--message` is acceptable only for short, single-line HTML.
+- `--body-file` (optional): custom HTML message to prepend (see Body Transport)
 - Uses BCC for privacy
 - Preserves original email formatting
 - Automatically splits large recipient lists into batches
@@ -206,19 +196,17 @@ py -3 scripts/outlook_skill.py batch-forward "<email_id>" "recipients.csv" --bod
 
 ### Redirect (Clear Recipients + New TO/CC)
 
-```powershell
-$body = "<p>Please handle.</p>"
-$body64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
-py -3 scripts/outlook_skill.py redirect "<email_id>" --to "a@b.com" --cc "b@b.com" --body-base64 $body64
+```bash
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py redirect "<email_id>" --to "a@b.com" --cc "b@b.com" --body-file "outbox/<name>.html"
 ```
 
 - Clears all existing TO and CC recipients, then adds new ones
 - Preserves original email body as quoted content (like forward)
-- `--body-base64` (preferred for send operations): Base64 encoded UTF-8 HTML message prepended above original content. `--body` is acceptable only for short, single-line HTML.
+- `--body-file`: HTML message prepended above original content (see Body Transport)
 - `--to` (required): New TO recipients (comma separated)
 - `--cc`: New CC recipients (comma separated)
 - `--attach`: File path(s) to attach (comma separated)
-- Use when you want to send the same email to entirely different people
+- Use when inherited recipients must be removed or replaced while keeping the thread
 
 ### Recall Sent Email
 ```bash
@@ -253,7 +241,7 @@ py -3 scripts/outlook_skill.py get-email "<email_id>" --truncate 1000
 - **Batch retrieval:** Supports passing multiple email IDs separated by spaces to print them sequentially in one run.
 - `--truncate N`: Truncate the printed body text to `N` characters to save terminal output and optimize context window/tokens.
 - Use after search/thread/related to read the actual content.
-- **Embedded images:** Auto-extracted to `%TEMP%\outlook_inline\<id>\`. Paths printed in output — use Read tool to view.
+- **Embedded images:** Auto-extracted to `<repo>/downloads/outlook_inline/<id>\` (gitignored; reused on re-read, folders older than 14 days pruned automatically). Paths printed in output — use Read tool to view. Never stored in the OS temp dir.
 
 ### Get Email HTML (Template Editing — Step 1: Read)
 ```bash
@@ -290,7 +278,6 @@ py -3 scripts/outlook_skill.py send-draft "<draft_email_id>"
 ```
 - Sends an existing draft email from the Drafts folder
 - Validates: must be unsent, must have at least one recipient
-- **⚠️ ALWAYS confirm with user before calling — NEVER send without approval**
 - **AI workflow:** `edit-html` (iterate until user approves) → `send-draft`
 
 ### Get Signature
@@ -327,12 +314,41 @@ powershell -Command "Get-Process outlook -ErrorAction SilentlyContinue | Stop-Pr
 py -3 scripts/outlook_skill.py list-calendar                             # today
 py -3 scripts/outlook_skill.py list-calendar --days 7                    # next 7 days
 py -3 scripts/outlook_skill.py list-calendar --start "2026-06-23" --end "2026-06-30"
+py -3 scripts/outlook_skill.py list-calendar --user "xuhuanxh@cn.ibm.com" --date "2026-09-28"
 ```
 - Shows appointments grouped by date: time range, subject, location, organizer, response status
 - `--days`: Number of days ahead (default: 1 = today only)
 - `--start`/`--end`: Explicit date range (YYYY-MM-DD)
+- `--user` / `--contact`: Check calendar/availability for another colleague
 - Includes recurring meetings (IncludeRecurrences enabled)
 - Response status: Organized, Accepted, Tentative, Declined, Not Responded
+
+### Check Availability / Free-Busy (Others' Calendar)
+```bash
+# Check availability for a single colleague
+py -3 scripts/outlook_skill.py check-availability "user@ibm.com"
+
+# Check multiple attendees + find common free slots (with your own calendar)
+py -3 scripts/outlook_skill.py check-availability "user1@ibm.com, user2@ibm.com" --date "2026-09-28" --compare
+
+# Show ONLY the common free slots for a 60-minute meeting
+py -3 scripts/outlook_skill.py check-availability "user1@ibm.com" "user2@ibm.com" --start "2026-09-28" --end "2026-09-30" --compare --common-only --duration 60
+
+# Load list of attendees from a file
+py -3 scripts/outlook_skill.py check-availability --file "attendees.txt" --date "2026-09-28" --compare
+```
+- Aliases: `free-busy`, `freebusy`, `check-calendar`
+- Queries Exchange / Outlook Free/Busy data across the organization for all specified attendees
+- `--date`: Target date (YYYY-MM-DD)
+- `--start` / `--end`: Date range (YYYY-MM-DD)
+- `--days`: Number of days to check (default: 1)
+- `--interval`: Slot resolution in minutes (`15`, `30`, `60`, default: `30`)
+- `--working-hours`: Filter working window (default: `09:00-18:00`, or `all`)
+- `--duration` / `--min-duration`: Minimum required meeting duration in minutes (e.g. `30`, `45`, `60`)
+- `--common-only` / `--slots-only`: Show only the mutual common free slots list (omits individual calendar breakdowns)
+- `--file`: Path to a text or CSV file with email addresses (comma-separated or one per line)
+- `--compare`: Cross-references with your own calendar to calculate **Mutual Common Free Slots**
+- `--json`: Machine-readable structured JSON output
 
 ### Respond to Meeting
 ```bash
@@ -349,9 +365,7 @@ py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action pro
 
 ### Sending Inline Images
 ```bash
-$body = "<p>HTML with <img src='cid:myimage'></p>"
-$body64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
-py -3 scripts/outlook_skill.py compose --to "email" --subject "text" --body-base64 $body64 --inline-image "C:\path\image.png:myimage"
+py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email" --subject "text" --body-file "outbox/<name>.html" --inline-image "C:/path/image.png:myimage"
 ```
 - `--inline-image`: Format is `filepath:cid_name` (comma separated for multiple)
 - Reference in HTML body via `<img src="cid:cid_name">`
@@ -384,9 +398,9 @@ class BatchConfig:
 ## HTML Format Examples
 
 ```html
-<p>Dear John,</p>
-<p>Message text here.</p>
-<p>Best regards,<br>Marlon</p>
+Hi John,<br><br>
+Message text here.<br>
+Second line of the message.
 ```
 
 **Lists — NO `<ul><li>`:** Outlook adds excessive spacing between list items. Use `<br>` with plain ASCII hyphens (`-`) instead of decorative bullets:
@@ -401,37 +415,12 @@ class BatchConfig:
 <ul><li>Item one</li><li>Item two</li></ul>
 ```
 
-## Shell-Safe Email Body Transport (MANDATORY POLICY)
+**Style rule:** Prefer plain ASCII hyphens (`-`) and straight apostrophes (`'`) in outbound email bodies unless special characters are necessary. Body transport rules: see [Body Transport](#body-transport-all-send-commands).
 
-> **⚠️ CRITICAL: NEVER construct email bodies by embedding unescaped strings inside PowerShell/Bash command strings (e.g. `powershell -Command "..."` or `$body = "..."`).**
-> Any dollar sign followed by a number or character (e.g., `$60`, `$500`, `$15,000`, `$var`) will be silently evaluated by Bash / PowerShell as an empty variable, causing severe corruption (e.g., `$60 USD` silently turning into `0 USD`).
-
-### The ONLY Approved Methods to Pass Email Bodies:
-
-#### Method 1 (Primary - Python Inline Base64 via py -3):
-Encode the body directly in Python and pass to `outlook_skill.py` via `--body-base64` in a single command, without going through Bash/PowerShell variable interpolation:
-
-```bash
-py -3 -c "import base64, subprocess, sys; body = '''<p>Hello team,</p><p>The cost is $60 USD.</p>'''; b64 = base64.b64encode(body.encode('utf-8')).decode('ascii'); sys.exit(subprocess.call(['py', '-3', 'assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py', 'reply', '<entry_id>', '--body-base64', b64]))"
-```
-
-#### Method 2 (Safe Body File via `--body-file`):
-Write the body text to a temporary file using the assistant's file tools, then pass `--body-file`:
-
-```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<entry_id>" --body-file "downloads/email_body.html"
-```
-
-**FORBIDDEN PATTERNS:**
-- ❌ `powershell -Command "$body = @'...'@; ..."` inside bash (Bash expands `$60` inside double quotes before PowerShell even sees it).
-- ❌ `$body | py -3 ... --body-stdin`
-- ❌ Direct `--body "text with $60"` in Bash without escaping `\$60`.
-
-**Style rule:** Prefer plain ASCII hyphens (`-`) and straight apostrophes (`'`) in outbound email bodies unless special characters are necessary.
 ## Find Workflow for Email Addresses
 
 1. Lookup display name: `lookup-contact "user@domain.com"`
-2. Find by display name: `find --type sender --query "Display Name"`
+2. Find by display name: `find --from "Display Name"`
 
 **Why:** Outlook MAPI doesn't reliably search by email address
 
@@ -440,10 +429,10 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<
 ### Finding All Emails About a Topic
 ```bash
 # Step 1: Start narrow and recent with a specific query
-py -3 scripts/outlook_skill.py find --type subject --query "voucher approval" --folders "Inbox,Sent Items" --days 14
+py -3 scripts/outlook_skill.py find --subject "voucher approval" --folders "Inbox,Sent Items" --days 14
 
 # Step 2: If not found, widen the time window but make the query more specific
-py -3 scripts/outlook_skill.py find --type subject --query "voucher approval philippines" --folders "Inbox,Sent Items" --days 45
+py -3 scripts/outlook_skill.py find --subject "voucher approval philippines" --folders "Inbox,Sent Items" --days 45
 
 # Step 3: From any result, find the full thread
 py -3 scripts/outlook_skill.py find-thread "<entry_id>"

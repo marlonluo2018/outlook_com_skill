@@ -1,6 +1,6 @@
 # Outlook Skill
 
-A Python-based skill for managing Microsoft Outlook emails through command-line interface. Provides 22 commands covering search, compose, reply, forward, template editing, folder management, and more. All send commands auto-output the sent email's EntryID for tracking.
+A Python-based skill for managing Microsoft Outlook through a command-line interface. It provides 28 primary commands (plus the `read` alias) covering search, compose, reply, forward, template editing, folder management, settings, and calendar operations. Send commands output the sent email's EntryID for tracking.
 
 ## Overview
 
@@ -20,6 +20,7 @@ This is a **universal skill module** that can be integrated with any AI assistan
 - **Contact Lookup**: Retrieve contact information by email or display name (Exchange GAL)
 - **Attachment Handling**: Download attachments, embed inline images via CID
 - **HTML Email Support**: All emails use HTML format with UTF-8 charset enforcement
+- **Calendar Operations**: List appointments and respond to meeting invitations
 
 ## Requirements
 
@@ -59,7 +60,10 @@ py -3 scripts/outlook_skill.py <command> [options]
 ```bash
 py -3 scripts/outlook_skill.py find-recent --days 7
 py -3 scripts/outlook_skill.py find-recent --days 7 --folder "Inbox"
+py -3 scripts/outlook_skill.py find-recent --days 7 --json
 ```
+
+`--json` is the stable machine-readable interface for sync consumers. Each item includes both `entry_id` and `conversation_id` so callers do not need to import internal backend modules.
 
 - Default: Inbox + Sent Items (both folders)
 - `--days`: 1-365 (default: 7)
@@ -69,19 +73,24 @@ py -3 scripts/outlook_skill.py find-recent --days 7 --folder "Inbox"
 #### Find Emails (Search)
 
 ```bash
-py -3 scripts/outlook_skill.py find --type subject --query "Meeting" --days 14
-py -3 scripts/outlook_skill.py find --type sender --query "John Smith"
-py -3 scripts/outlook_skill.py find --type recipient --query "Jane Doe"
-py -3 scripts/outlook_skill.py find --type body --query "project update"
+py -3 scripts/outlook_skill.py find --subject "Meeting" --days 14
+py -3 scripts/outlook_skill.py find --from "John Smith"
+py -3 scripts/outlook_skill.py find --to "Jane Doe"
+py -3 scripts/outlook_skill.py find --body "project update"
+py -3 scripts/outlook_skill.py find --from "John Smith" --subject "Meeting" --days 30
 ```
 
-- `--type`: subject, sender, recipient, body (required)
-- `--query`: Search term (required)
+- `--from`: Search by sender name or email
+- `--subject`: Search by subject
+- `--to`: Search by recipients in To + CC
+- `--body`: Search by body content
 - `--days`: 1-365 (default: 14)
 - `--folder` / `--folders`: Override search location
-- `--match-all`: AND logic (default: true)
+- `--limit`: Maximum number of results
+- Multiple fields use AND logic
+- Legacy `--type` / `--query` arguments remain accepted for compatibility
 
-Default folder by type: `subject`/`body` → Inbox + Sent Items | `sender` → Inbox | `recipient` → Sent Items
+Default folder by field: `--subject`/`--body` -> Inbox + Sent Items | `--from` -> Inbox | `--to` -> Sent Items
 
 #### Find Thread (Conversation)
 
@@ -103,7 +112,7 @@ Finds ALL emails sharing the same ConversationID across Inbox + Sent Items.
 ```bash
 py -3 scripts/outlook_skill.py find-related "<email_id>"
 py -3 scripts/outlook_skill.py find-related "<email_id>" --exclude-thread
-py -3 scripts/outlook_skill.py find-related "<email_id>" --strategies sender,keyword --max 10
+py -3 scripts/outlook_skill.py find-related "<email_id>" --strategies sender,keyword --limit 10
 ```
 
 4 strategies ranked by relevance:
@@ -118,7 +127,7 @@ py -3 scripts/outlook_skill.py find-related "<email_id>" --strategies sender,key
 - `--days`: Lookback window (default: 90)
 - `--strategies`: Comma-separated list (default: all four)
 - `--exclude-thread`: Skip thread strategy
-- `--max`: Limit results (default: 20)
+- `--limit`: Limit results (default: 20)
 - `--brief`: Compact output
 
 #### Contact Lookup
@@ -334,46 +343,33 @@ py -3 scripts/outlook_skill.py delete-email "<email_id>"
 ### Project Structure
 
 ```text
-outlook-skill/
-├── scripts/
-│   └── outlook_skill.py            # CLI entry point (22 commands)
-├── backend/
-│   ├── config.py                   # Centralized configuration
-│   ├── email_composition.py        # Email building helpers
-│   ├── batch_operations.py         # Batch forward logic
-│   ├── validation.py               # Input validation rules
-│   ├── validators.py               # Pydantic parameter validators
-│   ├── logging_config.py           # Logging setup
-│   ├── shared.py                   # Shared constants
-│   ├── utils.py                    # General utilities
-│   ├── email_metadata.py           # Metadata structures
-│   ├── email_data_extractor.py     # Email data extraction
-│   ├── email_utils.py              # Email utility functions
-│   ├── email_search/
-│   │   ├── __init__.py             # Public search API exports
-│   │   ├── unified_search.py       # Orchestrates search strategies
-│   │   ├── server_search.py        # Core engine (Restrict, merged scan)
-│   │   ├── search_common.py        # Shared search utilities
-│   │   ├── parallel_extractor.py   # Parallel email extraction
-│   │   ├── email_listing.py        # Recent email listing
-│   │   ├── subject_search.py       # Subject search
-│   │   ├── sender_search.py        # Sender search
-│   │   ├── recipient_search.py     # Recipient search (To+CC)
-│   │   └── body_search.py          # Body content search
-│   └── outlook_session/
-│       ├── __init__.py             # Session exports
-│       ├── session_manager.py      # COM session lifecycle
-│       ├── email_operations.py     # Send, reply, forward
-│       ├── folder_operations.py    # Folder CRUD
-│       ├── contact_operations.py   # Contact/GAL lookup
-│       ├── decorators.py           # COM operation decorators
-│       ├── utils.py                # Session utilities
-│       └── exceptions.py           # Custom exceptions
-├── tools/                          # Legacy (deprecated, unused)
-├── SKILL.md                        # Quick reference (AI-oriented)
-├── README.md                       # Full documentation
-├── requirements.txt                # pywin32==311
-└── LICENSE                         # MIT
+outlook_com_skill/
+|-- scripts/
+|   `-- outlook_skill.py            # Stable thin CLI entrypoint
+|-- backend/
+|   |-- cli/                        # CLI implementation, split by responsibility
+|   |   |-- app.py                  # Parse and dispatch
+|   |   |-- parser.py               # Complete argparse interface
+|   |   |-- runtime.py              # UTF-8, COM lock, child-process timeout
+|   |   |-- common.py               # Shared mail/body/recipient helpers
+|   |   |-- display.py              # Search/thread output formatting
+|   |   |-- search_commands.py      # Search, lookup, read, download
+|   |   |-- mail_commands.py        # Reply, compose, forward, redirect, send
+|   |   |-- folder_commands.py      # Folder, move, delete, recall
+|   |   |-- template_commands.py    # HTML template editing
+|   |   |-- settings_commands.py    # OOO and signatures
+|   |   `-- calendar_commands.py    # Calendar listing and meeting responses
+|   |-- config.py                   # Centralized configuration
+|   |-- email_search/               # Search engines and extraction
+|   `-- outlook_session/            # COM session and Outlook operations
+|-- tests/                          # Non-COM parser/helper/entrypoint tests
+|-- .github/workflows/ci.yml        # Windows compile, static checks, tests
+|-- tools/                          # Legacy compatibility utilities
+|-- SKILL.md                        # AI-oriented operating instructions
+|-- README.md                       # Full documentation
+|-- requirements.txt                # Runtime dependency
+|-- requirements-dev.txt            # Test and lint dependencies
+`-- pyproject.toml                  # Pytest and Ruff configuration
 ```
 
 ### Design Principles
@@ -409,9 +405,7 @@ All email bodies use HTML format:
 </ul>
 ```
 
-**Special characters:** Replace `$` with `&#36;` to avoid shell interpolation.
-
-Common entities: `$` = `&#36;` | `&` = `&amp;` | `<` = `&lt;` | `>` = `&gt;`
+**Shell safety:** Pass substantial bodies through `--body-file` or `--body-base64`. Do not embed currency values or other shell-sensitive text directly in a PowerShell/Bash command string.
 
 ---
 
@@ -422,7 +416,7 @@ Common entities: `$` = `&#36;` | `&` = `&amp;` | `<` = `&lt;` | `>` = `&gt;`
 Outlook MAPI doesn't reliably search by email address:
 
 1. `lookup-contact "user@example.com"` → get display name
-2. `find --type sender --query "Display Name"` → search by name
+2. `find --from "Display Name"` → search by name
 
 ### Performance
 
@@ -435,8 +429,8 @@ Outlook MAPI doesn't reliably search by email address:
 
 ```bash
 # Start narrow → widen → thread → related
-find --type subject --query "topic" --days 14
-find --type subject --query "topic" --days 45
+find --subject "topic" --days 14
+find --subject "topic" --days 45
 find-thread "<email_id>"
 find-related "<email_id>"
 ```
@@ -466,9 +460,19 @@ Centralized in `backend/config.py`:
 
 ---
 
-## Why No Calendar
+## Calendar & Meeting Responses
 
-This skill deliberately excludes calendar/scheduling functionality. In a corporate environment, meetings are managed through Microsoft Teams, and Outlook calendar events are tightly coupled with Teams — creating or modifying calendar items outside of Teams breaks the integration (no Teams meeting links, no lobby controls, no attendance tracking). Even for simple operations like scheduling a meeting, clicking in Outlook's GUI is far easier than having to copy-paste a Teams link through the command line. The automation value of standalone calendar operations is too low to justify the effort.
+The CLI supports read-only calendar listing and explicit meeting responses:
+
+```bash
+py -3 scripts/outlook_skill.py list-calendar --days 7
+py -3 scripts/outlook_skill.py list-calendar --start "2026-09-20" --end "2026-09-27"
+py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action accept
+py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action tentative
+py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action decline
+```
+
+The skill does not create new meetings or modify Teams meeting configuration.
 
 ---
 

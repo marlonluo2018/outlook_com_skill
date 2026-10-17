@@ -15,6 +15,11 @@ from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Snapshot body preview length. Long enough for the email-sync classifier to
+# judge scope and draft timeline summaries without per-email get-email calls;
+# the full Body is already in COM memory when the preview is cut.
+BODY_PREVIEW_LENGTH = 2000
+
 
 def get_folder_path_safe(folder_name: Optional[str] = None) -> str:
     """Get safe folder path, defaulting to Inbox if not provided."""
@@ -202,11 +207,11 @@ def extract_email_info_minimal(item) -> Dict[str, Any]:
             has_attachments = False
             attachments_list = []
         
-        # Body preview — first 200 chars for quick scope judgment
+        # Body preview — leading chars for quick scope judgment
         body_preview = ""
         try:
             raw_body = getattr(item, 'Body', '') or ''
-            body_preview = raw_body[:200].strip()
+            body_preview = raw_body[:BODY_PREVIEW_LENGTH].strip()
         except Exception:
             pass
 

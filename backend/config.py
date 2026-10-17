@@ -4,8 +4,45 @@ This module consolidates all configuration constants to enable easy
 customization and environment-specific settings.
 """
 
+from pathlib import Path
 from typing import Optional
 import os
+import time
+
+
+def _project_downloads_dir() -> Path:
+    """Project-owned cache root: <repo>/downloads (gitignored, never %TEMP%).
+
+    Walk up from this file to the repo root (the directory containing the
+    'assistant_brain' folder), then fall back to the current directory.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "assistant_brain").is_dir():
+            return parent / "downloads"
+    return Path.cwd() / "downloads"
+
+
+class PathConfig:
+    """Filesystem locations for skill outputs.
+
+    Email-derived artifacts (embedded images extracted by get-email) are
+    durable evidence: they often carry approval/report content the user may
+    need to re-read. They belong under the project's gitignored downloads/
+    folder, not the OS temp dir, and are pruned only by age.
+    """
+
+    downloads_dir = _project_downloads_dir()
+
+    # Embedded images extracted by get-email, one subfolder per EntryID
+    inline_images_dir = downloads_dir / "outlook_inline"
+
+    # Drop inline-image folders whose files are all older than this
+    inline_images_max_age_days = 14
+
+
+path_config = PathConfig()
+
 
 
 class ConnectionConfig:
@@ -223,4 +260,5 @@ __all__ = [
     'attachment_config',
     'email_metadata_config',
     'validation_config',
+    'path_config',
 ]
