@@ -763,6 +763,20 @@ def cmd_cancel_invite(args):
             item.MeetingStatus = _OL_MEETING_CANCELED
             item.Send()
             print("\nCancellation sent.")
+
+            # Sending the notice leaves the organiser own copy in the calendar (its
+            # MeetingStatus stays olMeeting, measured 2026-11-12), so a "cancel"
+            # that stopped here would look half done. Remove that copy too; if the
+            # delete fails the notice has still gone out, so report rather than fail.
+            try:
+                item.Delete()
+                print("Organiser copy removed from the calendar.")
+            except Exception as exc:
+                print(
+                    f"Notice sent, but the calendar copy is still there ({exc}). "
+                    "Remove it with: delete-appointment <entry-id> --force",
+                    file=sys.stderr,
+                )
             return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

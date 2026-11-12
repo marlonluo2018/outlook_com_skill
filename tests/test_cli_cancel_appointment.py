@@ -70,6 +70,8 @@ def test_cancel_sends_and_marks_cancelled():
         assert cal.cmd_cancel_invite(_args()) == 0
     assert item.sent == 1
     assert item.MeetingStatus == cal._OL_MEETING_CANCELED
+    # the notice goes out and the organiser copy is removed in the same command
+    assert item.deleted == 1
 
 
 def test_cancel_refuses_a_non_meeting():

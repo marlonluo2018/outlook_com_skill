@@ -413,6 +413,17 @@ py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action pro
 - Sends response immediately (no draft gate — user explicitly chose the action)
 - Prints confirmation: action, subject, organizer, time
 
+### Cancel or delete a calendar item
+```bash
+py -3 scripts/outlook_skill.py cancel-invite "<appointment_entry_id>" --dry-run
+py -3 scripts/outlook_skill.py cancel-invite "<appointment_entry_id>"
+py -3 scripts/outlook_skill.py delete-appointment "<appointment_entry_id>" --force
+```
+- **Creating an invitation is not this skill.** Only a browser session can make the server mint a Teams join link on this account, so invitations are sent by `teams_web_skill`; cancelling stays here because it is an outgoing message with a review path already, and it acts on the item Outlook holds.
+- `cancel-invite` sends the cancellation notice to every invitee **and removes the organiser own copy**: sending alone leaves that copy behind with `MeetingStatus` still `olMeeting` (measured 2026-11-12), which reads as a half-finished cancel.
+- `delete-appointment` sends nothing; it refuses a live meeting unless `--force`, because deleting one silently leaves invitees holding an appointment that no longer exists for anybody else.
+- Both accept `--dry-run`, print the subject / time / invitee list they resolved, and go through the EntryID guard, so a truncated or invented ID never reaches MAPI.
+
 ### Sending Inline Images
 ```bash
 py -3 scripts/outlook_skill.py compose --to "email" --subject "text" --body-file "outbox/<name>.html" --inline-image "C:/path/image.png:myimage"
