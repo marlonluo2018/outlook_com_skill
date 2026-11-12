@@ -33,6 +33,8 @@ EXPECTED_COMMANDS = {
     "update-signature",
     "list-calendar",
     "respond-meeting",
+    "cancel-invite",
+    "delete-appointment",
     "check-availability",
     "free-busy",
     "freebusy",

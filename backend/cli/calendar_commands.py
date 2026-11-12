@@ -683,3 +683,119 @@ def cmd_respond_meeting(args):
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
 
+
+# --- invite cancel / calendar delete -----------------------------------------
+# Sending an invitation belongs to teams_web_skill (the browser can mint a Teams
+# join link, the COM path cannot). Cancelling stays here: it is an outgoing
+# message with a review path already, and it must act on the item Outlook holds.
+
+_OL_MEETING = 1
+_OL_MEETING_CANCELED = 5
+
+
+def _appointment_summary(item) -> dict:
+    """What an operator needs to see before an irreversible calendar action."""
+
+    def safe(attr, default=""):
+        try:
+            return getattr(item, attr, default)
+        except Exception:
+            return default
+
+    start = safe("Start", None)
+    end = safe("End", None)
+    try:
+        when = f"{start.replace(tzinfo=None)} ~ {end.replace(tzinfo=None)}"
+    except Exception:
+        when = ""
+    recipients = []
+    try:
+        for i in range(1, min(item.Recipients.Count, 25) + 1):
+            address = item.Recipients.Item(i).Address or ""
+            if address:
+                recipients.append(address)
+    except Exception:
+        pass
+    return {
+        "subject": safe("Subject", "(No subject)"),
+        "when": when,
+        "location": safe("Location", ""),
+        "meeting_status": int(safe("MeetingStatus", 0) or 0),
+        "organizer": safe("Organizer", ""),
+        "recipients": recipients,
+    }
+
+
+def cmd_cancel_invite(args):
+    """Cancel a meeting you organise, notifying every invitee.
+
+    Manual invitations are created by teams_web_skill; cancelling stays in this
+    skill because it is an outgoing message (same review gate as email) and it
+    must act on the item Outlook already has, not in a browser session.
+    """
+    try:
+        with OutlookSessionManager() as session:
+            item = _get_email_item(session, args.email_id, getattr(args, "subject", None))
+            summary = _appointment_summary(item)
+
+            if summary["meeting_status"] != _OL_MEETING:
+                print(
+                    f"Error: not a live meeting (MeetingStatus={summary['meeting_status']}). "
+                    "Only an organiser meeting can be cancelled; use delete-appointment "
+                    "for a plain event.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            print("Action: Cancel meeting (sends a cancellation to every invitee)")
+            print(f"Meeting: {summary['subject']}")
+            if summary["when"]:
+                print(f"When: {summary['when']}")
+            if summary["recipients"]:
+                print(f"Invitees: {', '.join(summary['recipients'])}")
+
+            if getattr(args, "dry_run", False):
+                print("\nDry run: nothing was sent.")
+                return 0
+
+            # olMeetingCanceled + Send() is what makes Outlook notify invitees;
+            # Delete() alone would drop the meeting without telling anyone.
+            item.MeetingStatus = _OL_MEETING_CANCELED
+            item.Send()
+            print("\nCancellation sent.")
+            return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_delete_appointment(args):
+    """Remove a calendar item without notifying anybody."""
+    try:
+        with OutlookSessionManager() as session:
+            item = _get_email_item(session, args.email_id, getattr(args, "subject", None))
+            summary = _appointment_summary(item)
+
+            print("Action: Delete calendar item (no notification is sent)")
+            print(f"Item: {summary['subject']}")
+            if summary["when"]:
+                print(f"When: {summary['when']}")
+
+            if summary["meeting_status"] == _OL_MEETING and not getattr(args, "force", False):
+                print(
+                    "\nError: this is a live meeting with invitees. Cancelling would notify "
+                    "them, deleting would not. Use cancel-invite, or pass --force.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            if getattr(args, "dry_run", False):
+                print("\nDry run: nothing was deleted.")
+                return 0
+
+            item.Delete()
+            print("\nDeleted.")
+            return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1

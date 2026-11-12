@@ -6,7 +6,13 @@ import argparse
 
 from backend.config import search_config
 
-from .calendar_commands import cmd_check_availability, cmd_list_calendar, cmd_respond_meeting
+from .calendar_commands import (
+    cmd_cancel_invite,
+    cmd_check_availability,
+    cmd_delete_appointment,
+    cmd_list_calendar,
+    cmd_respond_meeting,
+)
 from .folder_commands import (
     cmd_create_folder,
     cmd_delete_email,
@@ -339,5 +345,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser_respond.add_argument('--start', help='Proposed new start time (YYYY-MM-DD HH:MM, for --action propose)')
     parser_respond.add_argument('--end', help='Proposed new end time (YYYY-MM-DD HH:MM, for --action propose)')
     parser_respond.set_defaults(func=cmd_respond_meeting)
+
+    # Cancel a meeting you organise: sends the cancellation to every invitee.
+    # Invitations themselves are created by teams_web_skill (only a browser can
+    # mint a Teams join link on this account); cancelling lives here so it uses
+    # the item Outlook already holds and the existing review gate.
+    parser_cancel = subparsers.add_parser(
+        'cancel-invite',
+        help='Cancel a meeting you organise, notifying every invitee',
+    )
+    parser_cancel.add_argument('email_id', help='Appointment Entry ID')
+    parser_cancel.add_argument('--subject', help='Resolve by subject when the EntryID is short or unknown')
+    parser_cancel.add_argument('--dry-run', dest='dry_run', action='store_true', help='Show the plan, send nothing')
+    parser_cancel.set_defaults(func=cmd_cancel_invite)
+
+    # Delete a calendar item without notifying anybody.
+    parser_delete_appt = subparsers.add_parser(
+        'delete-appointment',
+        help='Delete a calendar item without notifying anybody',
+    )
+    parser_delete_appt.add_argument('email_id', help='Appointment Entry ID')
+    parser_delete_appt.add_argument('--subject', help='Resolve by subject when the EntryID is short or unknown')
+    parser_delete_appt.add_argument('--force', action='store_true', help='Delete even a live meeting (invitees are not told)')
+    parser_delete_appt.add_argument('--dry-run', dest='dry_run', action='store_true', help='Show the plan, delete nothing')
+    parser_delete_appt.set_defaults(func=cmd_delete_appointment)
 
     return parser
