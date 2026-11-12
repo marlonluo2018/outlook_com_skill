@@ -1,1 +1,6 @@
+# Runtime dependencies. CI installs this file; anything imported by backend/
+# or scripts/ but missing here fails the build at collection time (that is how
+# pydantic went unnoticed from 2026-10-17: it was installed on the dev machine
+# but never listed, so only CI could see the gap).
 pywin32==311
+pydantic>=2,<3
