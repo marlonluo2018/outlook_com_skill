@@ -10,17 +10,29 @@ import os
 import time
 
 
-def _project_downloads_dir() -> Path:
-    """Project-owned cache root: <repo>/downloads (gitignored, never %TEMP%).
+def _host_root():
+    """Root of the host project, or None when the skill runs standalone.
 
-    Walk up from this file to the repo root (the directory containing the
-    'assistant_brain' folder), then fall back to the current directory.
+    A host is detected by an 'assistant_brain' directory above the skill
+    (e.g. BrainClaw). Without a host, runtime outputs fall back to a
+    self-contained .outlook-skill/ directory inside the skill repo.
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
         if (parent / "assistant_brain").is_dir():
-            return parent / "downloads"
-    return Path.cwd() / "downloads"
+            return parent
+    return None
+
+
+# Self-contained runtime root for standalone runs (no host detected); gitignored.
+_STANDALONE_ROOT = Path(__file__).resolve().parents[1] / ".outlook-skill"
+
+
+def _project_downloads_dir() -> Path:
+    """Downloads root: <host>/downloads when a host is present, else the
+    standalone root (gitignored, never %TEMP%)."""
+    host = _host_root()
+    return host / "downloads" if host else _STANDALONE_ROOT / "downloads"
 
 
 class PathConfig:
@@ -32,16 +44,57 @@ class PathConfig:
     folder, not the OS temp dir, and are pruned only by age.
     """
 
-    downloads_dir = _project_downloads_dir()
-
-    # Embedded images extracted by get-email, one subfolder per EntryID
-    inline_images_dir = downloads_dir / "outlook_inline"
-
     # Drop inline-image folders whose files are all older than this
     inline_images_max_age_days = 14
 
 
 path_config = PathConfig()
+
+
+class HostPathConfig:
+    """Runtime paths, overridable via environment variables.
+
+      OUTLOOK_SKILL_CACHE_DIR      find-result cache (last-find.json)
+      OUTLOOK_SKILL_TASKS_DIR      task files scanned by --task T###
+      OUTLOOK_SKILL_OUTBOX_DIR     body files, removed after a successful send
+      OUTLOOK_SKILL_DOWNLOADS_DIR  attachments and extracted inline images
+
+    With a host project detected (an 'assistant_brain' directory above the
+    skill, e.g. BrainClaw), defaults follow the host layout. Standalone runs
+    fall back to the self-contained .outlook-skill/ directory inside the
+    skill repo. Env vars win in both modes.
+    """
+
+    @staticmethod
+    def _override(name: str, default: Path) -> Path:
+        value = os.environ.get(name)
+        return Path(value) if value else default
+
+    @classmethod
+    def cache_dir(cls) -> Path:
+        host = _host_root()
+        default = host / "assistant_brain" / "sync_results" if host else _STANDALONE_ROOT / "cache"
+        return cls._override("OUTLOOK_SKILL_CACHE_DIR", default)
+
+    @classmethod
+    def tasks_dir(cls) -> Path:
+        host = _host_root()
+        default = host / "assistant_brain" / "tasks" if host else _STANDALONE_ROOT / "tasks"
+        return cls._override("OUTLOOK_SKILL_TASKS_DIR", default)
+
+    @classmethod
+    def outbox_dir(cls) -> Path:
+        host = _host_root()
+        default = host / "outbox" if host else _STANDALONE_ROOT / "outbox"
+        return cls._override("OUTLOOK_SKILL_OUTBOX_DIR", default)
+
+    @classmethod
+    def downloads_dir(cls) -> Path:
+        return cls._override("OUTLOOK_SKILL_DOWNLOADS_DIR", _project_downloads_dir())
+
+    @classmethod
+    def inline_images_dir(cls) -> Path:
+        return cls.downloads_dir() / "outlook_inline"
 
 
 
@@ -261,4 +314,5 @@ __all__ = [
     'email_metadata_config',
     'validation_config',
     'path_config',
+    'HostPathConfig',
 ]

@@ -35,7 +35,7 @@ def cmd_move_email(args):
     """Move an email to a folder by email ID"""
     try:
         with OutlookSessionManager() as session:
-            email_item = session.outlook.GetNamespace("MAPI").GetItemFromID(args.email_id)
+            email_item = _get_email_item(session, args.email_id)
             
             # Get target folder
             target_folder = session.get_folder(args.folder)
@@ -56,7 +56,7 @@ def cmd_delete_email(args):
     """Delete an email by ID"""
     try:
         with OutlookSessionManager() as session:
-            email_item = session.outlook.GetNamespace("MAPI").GetItemFromID(args.email_id)
+            email_item = _get_email_item(session, args.email_id)
             subject = email_item.Subject
             email_item.Delete()
             print(f"Successfully deleted email: {subject}")

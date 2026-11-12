@@ -9,7 +9,7 @@ import sys
 import tempfile
 from typing import Optional
 
-from backend.config import path_config, search_config
+from backend.config import HostPathConfig, path_config, search_config
 from backend.email_search import (
     find_related_emails,
     find_thread_by_email_id,
@@ -21,7 +21,14 @@ from backend.email_search import (
 from backend.outlook_session.contact_operations import get_contact_by_email, get_contact_by_name
 from backend.outlook_session.session_manager import OutlookSessionManager
 
-from .common import _get_email_item, _get_smtp_address, _is_embedded_image
+from .common import (
+    _get_email_item,
+    _get_smtp_address,
+    _is_embedded_image,
+    cache_provenance_note,
+    cache_search_results,
+    load_search_cache,
+)
 from .display import (
     _display_email_list,
     _display_email_list_brief,
@@ -39,7 +46,7 @@ def _prepare_inline_image_dir(email_id: str) -> str:
     """
     import time
 
-    base = path_config.inline_images_dir
+    base = HostPathConfig.inline_images_dir()
     try:
         if base.is_dir():
             cutoff = time.time() - path_config.inline_images_max_age_days * 86400
@@ -109,6 +116,13 @@ def cmd_list_recent(args):
 
         if args.limit and len(emails) > args.limit:
             emails = emails[:args.limit]
+
+        # find-recent rows are numbered too — cache them so a later --pick N
+        # references THIS list instead of an older `find` result set.
+        recent_desc = f"find-recent --days {args.days}"
+        if args.folder:
+            recent_desc += f" --folder {args.folder}"
+        cache_search_results(emails, context=recent_desc)
 
         email_count = len(emails)
 
@@ -229,6 +243,10 @@ def cmd_search(args):
             emails = emails[:args.limit]
             note += f" (showing first {args.limit})"
 
+        # Remember this result set so callers can say --pick <n> instead of copying an EntryID.
+        find_desc = " + ".join(f"--{t} '{q}'" for t, q in field_searches)
+        cache_search_results(emails, context=f"find {find_desc} --days {effective_days}")
+
         print(f"\n✅ {note}\n")
 
         if emails:
@@ -242,6 +260,43 @@ def cmd_search(args):
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
 
+def _resolve_reference(pick, use_last, task_ref):
+    """Turn a human-friendly reference into an EntryID without anyone copying the ID.
+
+    - task_ref = 'T152' (or a path): use that task file's `<!-- email:... -->` markers
+    - pick = N: row number N from the last `find` result set
+    - use_last = True: the last row of the last `find` result set
+    """
+    if task_ref:
+        import glob
+        base = str(HostPathConfig.tasks_dir())
+        pattern = task_ref if task_ref.endswith('.md') else os.path.join(base, task_ref + '*.md')
+        files = sorted(glob.glob(pattern))
+        if not files:
+            return None, None, f'no task file matched {task_ref}'
+        content = open(files[0], encoding='utf-8').read()
+        ids = re.findall(r'<!-- email:([0-9A-Fa-f]{100,}) -->', content)
+        if not ids:
+            return None, None, f'no email marker in {os.path.basename(files[0])}'
+        idx = pick if pick else len(ids)
+        if idx < 1 or idx > len(ids):
+            return None, None, f'{task_ref} has {len(ids)} markers, asked for #{idx}'
+        return ids[idx - 1], None, f"using marker #{idx}/{len(ids)} from {os.path.basename(files[0])}"
+
+    rows = load_search_cache()
+    if not rows:
+        return None, None, 'no cached find results — run `find` first'
+    if use_last and pick is None:
+        pick = len(rows)
+    if pick is None or pick < 1 or pick > len(rows):
+        return None, None, f'cache holds {len(rows)} rows, asked for #{pick}'
+    row = rows[pick - 1]
+    return row.get('entry_id'), row.get('subject'), (
+        f"using find result #{pick}/{len(rows)} {cache_provenance_note()}: "
+        f"{str(row.get('subject'))[:60]} ({row.get('received')})"
+    )
+
+
 def cmd_get_email(args):
     """Get full email details by ID"""
     try:
@@ -254,9 +309,27 @@ def cmd_get_email(args):
             else:
                 email_ids = [args.email_id]
 
-        if not email_ids:
-            print("Error: email_id is required (positional or --id)", file=sys.stderr)
+        subject_hint = getattr(args, 'subject', None)
+        pick = getattr(args, 'pick', None)
+        use_last = getattr(args, 'last', False)
+        task_ref = getattr(args, 'task', None)
+
+        # Resolve a reference (row number in the last find, newest marker in a task file)
+        # so that an EntryID never has to be typed or copied by hand.
+        if pick is not None or use_last or task_ref:
+            resolved_id, resolved_subject, desc = _resolve_reference(pick, use_last, task_ref)
+            if not resolved_id:
+                print(f"Error: could not resolve reference ({desc})", file=sys.stderr)
+                return 1
+            email_ids = [resolved_id]
+            subject_hint = subject_hint or resolved_subject
+            print(f"\nℹ️ {desc}")
+
+        if not email_ids and not subject_hint:
+            print("Error: email_id (positional/--id) or --subject is required", file=sys.stderr)
             return 1
+        if not email_ids:
+            email_ids = ["<by-subject>"]
 
         fields = None
         if getattr(args, 'fields', None):
@@ -274,7 +347,7 @@ def cmd_get_email(args):
                     print("="*40)
                 
                 try:
-                    email_item = _get_email_item(session, email_id)
+                    email_item = _get_email_item(session, email_id, subject=subject_hint)
                 except Exception as e:
                     print(f"Error fetching email {email_id}: {str(e)}", file=sys.stderr)
                     continue

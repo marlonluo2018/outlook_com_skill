@@ -139,3 +139,6 @@ test_data/
 logs/
 *.log
 
+
+# Standalone runtime outputs (no host project detected)
+.outlook-skill/

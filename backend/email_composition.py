@@ -19,6 +19,13 @@ logger = get_logger(__name__)
 
 def _get_email_item(session, message_id: str):
     """Resolve an Outlook item by EntryID, retrying across all stores when needed."""
+    # Fail fast on a truncated/hallucinated ID (see cli.common._require_full_entry_id).
+    id_text = str(message_id or '').strip()
+    if len(id_text) < 140:
+        raise ValueError(
+            f"EntryID rejected: {len(id_text)} characters, but a valid Outlook mail "
+            "EntryID is about 140. A short ID is a truncated or hallucinated copy."
+        )
     namespace = session.namespace or session.outlook.GetNamespace("MAPI")
 
     try:

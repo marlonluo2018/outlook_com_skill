@@ -1,5 +1,7 @@
 import argparse
 
+import pytest
+
 from backend.cli import runtime
 
 
@@ -28,3 +30,48 @@ def test_lock_is_a_context_manager_when_windows_locking_is_unavailable(monkeypat
     monkeypatch.setattr(runtime, "msvcrt", None)
     with runtime._outlook_cli_lock():
         pass
+
+
+def test_preflight_blocks_low_integrity_process(monkeypatch):
+    monkeypatch.delenv("OUTLOOK_SKILL_IGNORE_INTEGRITY", raising=False)
+    monkeypatch.setattr(runtime, "is_low_integrity", lambda: True)
+    error = runtime._outlook_preflight_error()
+    assert error is not None
+    assert "Low integrity" in error
+
+
+def test_preflight_allows_medium_integrity_process(monkeypatch):
+    monkeypatch.delenv("OUTLOOK_SKILL_IGNORE_INTEGRITY", raising=False)
+    monkeypatch.setattr(runtime, "is_low_integrity", lambda: False)
+    assert runtime._outlook_preflight_error() is None
+
+
+def test_preflight_can_be_overridden_for_diagnostics(monkeypatch):
+    monkeypatch.setenv("OUTLOOK_SKILL_IGNORE_INTEGRITY", "1")
+    monkeypatch.setattr(runtime, "is_low_integrity", lambda: True)
+    assert runtime._outlook_preflight_error() is None
+
+
+def test_preflight_never_raises_when_probe_fails(monkeypatch):
+    monkeypatch.delenv("OUTLOOK_SKILL_IGNORE_INTEGRITY", raising=False)
+
+    def boom():
+        raise OSError("probe exploded")
+
+    monkeypatch.setattr(runtime, "is_low_integrity", boom)
+    assert runtime._outlook_preflight_error() is None
+
+
+def test_isolated_run_fails_fast_on_low_integrity(monkeypatch, capsys):
+    monkeypatch.delenv(runtime.OUTLOOK_SKILL_CHILD_ENV, raising=False)
+    monkeypatch.delenv("OUTLOOK_SKILL_IGNORE_INTEGRITY", raising=False)
+    monkeypatch.setattr(runtime, "is_low_integrity", lambda: True)
+
+    def explode(*args, **kwargs):
+        raise AssertionError("must not spawn a child process at Low integrity")
+
+    monkeypatch.setattr(runtime.subprocess, "run", explode)
+    args = argparse.Namespace(command="find", timeout=None)
+
+    assert runtime._run_outlook_command_isolated(args) == 125
+    assert "cannot reach Outlook COM" in capsys.readouterr().err

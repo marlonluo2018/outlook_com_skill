@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import os
 import re
 import sys
 import tempfile
 import time
+
+from backend.config import HostPathConfig
 
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.ico', '.webp'}
@@ -16,8 +19,236 @@ DOCUMENT_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'
 _FONT_STYLE = 'font-family:Calibri,sans-serif;font-size:11pt;'
 
 
-def _get_email_item(session, email_id):
-    """Get email by ID, retrying across all Outlook stores when needed."""
+_SEARCH_CACHE_NAME = 'last-find.json'
+_SEARCH_CACHE_STALE_AFTER_MINUTES = 60
+
+
+def _repo_root():
+    """Best-effort repo root (the CLI lives under assistant_brain/skills/...)."""
+    here = os.path.abspath(os.path.dirname(__file__))
+    for _ in range(6):
+        if os.path.isdir(os.path.join(here, 'assistant_brain')):
+            return here
+        here = os.path.dirname(here)
+    return os.getcwd()
+
+
+def _search_cache_path():
+    cache_dir = str(HostPathConfig.cache_dir())
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception:
+        cache_dir = _repo_root()
+    return os.path.join(cache_dir, _SEARCH_CACHE_NAME)
+
+
+def cache_search_results(emails, context=''):
+    """Remember the last displayed result set so callers can reference row #N
+    instead of copying an EntryID.
+
+    `context` records which command produced the rows (e.g. "find --from 'x'
+    --days 7"). It is echoed back whenever the cache is used, so referencing
+    a stale or different-than-expected result set is visible instead of silent.
+    """
+    rows = []
+    for idx, e in enumerate(emails or [], 1):
+        rows.append({
+            'n': idx,
+            'entry_id': e.get('id') or e.get('entry_id', ''),
+            'subject': e.get('subject', ''),
+            'sender': e.get('sender', ''),
+            'received': str(e.get('received_time', ''))[:19],
+            'folder': e.get('folder', ''),
+        })
+    payload = {
+        'rows': rows,
+        'context': context or 'find',
+        'saved_at': time.time(),
+    }
+    try:
+        with open(_search_cache_path(), 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def load_search_cache():
+    try:
+        with open(_search_cache_path(), 'r', encoding='utf-8') as fh:
+            return json.load(fh).get('rows', [])
+    except Exception:
+        return []
+
+
+def load_search_cache_provenance():
+    """Source command and save time of the cached result set."""
+    try:
+        with open(_search_cache_path(), 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+        return {
+            'context': data.get('context', 'unknown find'),
+            'saved_at': data.get('saved_at', 0),
+        }
+    except Exception:
+        return {'context': 'unknown find', 'saved_at': 0}
+
+
+def cache_provenance_note():
+    """One-line provenance for the cached result set, shown on --pick/--last.
+
+    The cache holds only the most recent result set, so a caller can think it
+    references one `find` while the cache actually holds another. Printing the
+    source command and its age makes that mismatch visible instead of silent;
+    warn once the cache is older than _SEARCH_CACHE_STALE_AFTER_MINUTES.
+    """
+    meta = load_search_cache_provenance()
+    note = f"from `{meta['context']}`"
+    if not meta['saved_at']:
+        return note + " (age unknown)"
+    age_min = max(0, (time.time() - meta['saved_at']) / 60)
+    if age_min >= _SEARCH_CACHE_STALE_AFTER_MINUTES:
+        return note + f" ⚠ {int(age_min)} min old — if this is not the result set you meant, re-run find"
+    return note + f" ({int(age_min)} min ago)"
+
+
+MIN_ENTRY_ID_LENGTH = 140
+
+
+def _require_full_entry_id(email_id, subject=None):
+    """Reject a truncated or hallucinated EntryID before it reaches MAPI.
+
+    A valid Outlook mail EntryID is ~140 hex characters. A shorter one was
+    truncated (terminal-wrapped hand copy) or hallucinated (an LLM asked to
+    reproduce the ID drops characters — observed 160 -> 90 with DeepSeek V4)
+    and can never be opened, so fail fast with an actionable message instead
+    of a cryptic COM error. Skipped when a --subject fallback is available.
+    """
+    id_text = str(email_id or '').strip()
+    if len(id_text) < MIN_ENTRY_ID_LENGTH and not subject:
+        raise ValueError(
+            f"EntryID rejected: {len(id_text)} characters, but a valid Outlook mail "
+            f"EntryID is about {MIN_ENTRY_ID_LENGTH}. A short ID is a truncated or "
+            "hallucinated copy that can never be opened. Reference the email instead: "
+            "get-email --pick N / --last (row from the last `find`), get-email --task "
+            "T### [--pick N] (task-file marker), or pass --subject."
+        )
+
+
+_FALLBACK_FOLDER_IDS = (6, 5, 16, 3, 4)  # Inbox, Sent, Drafts, Deleted, Outbox
+_FALLBACK_SCAN_LIMIT = 1500
+
+
+def _scan_folder_for_entry_id(folder, email_id, limit):
+    """Return the item whose EntryID matches, scanning the folder newest-first."""
+    try:
+        items = folder.Items
+    except Exception:
+        return None
+    try:
+        items.Sort("[ReceivedTime]", True)
+    except Exception:
+        pass
+    try:
+        item = items.GetFirst()
+    except Exception:
+        return None
+    seen = 0
+    while item is not None and seen < limit:
+        seen += 1
+        try:
+            if item.EntryID == email_id:
+                return item
+        except Exception:
+            pass
+        try:
+            item = items.GetNext()
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_by_enumeration(session, email_id):
+    """Resolve an item by scanning well-known folders.
+
+    Some Outlook/MAPI sessions reject GetItemFromID for every EntryID even
+    though folder enumeration reads the same items fine. Enumeration costs a
+    couple of seconds for a few hundred items, so it is a safe fallback.
+    """
+    try:
+        namespace = session.namespace or session.outlook.GetNamespace("MAPI")
+    except Exception:
+        return None
+    for folder_id in _FALLBACK_FOLDER_IDS:
+        try:
+            folder = namespace.GetDefaultFolder(folder_id)
+        except Exception:
+            continue
+        found = _scan_folder_for_entry_id(folder, email_id, _FALLBACK_SCAN_LIMIT)
+        if found is not None:
+            print(f"[outlook] GetItemFromID failed; resolved by scanning {folder.Name}")
+            return found
+    return None
+
+
+_WARM_FOLDER_IDS = (6, 5)  # Inbox, Sent Items
+_WARM_SAMPLE = 25
+
+
+def _warm_store(namespace):
+    """Touch a few recent items so MAPI materialises the store table.
+
+    In this environment GetItemFromID can fail on a cold session even for a
+    perfectly valid EntryID, and succeed once the store has been read.
+    """
+    for folder_id in _WARM_FOLDER_IDS:
+        try:
+            items = namespace.GetDefaultFolder(folder_id).Items
+            items.Sort("[ReceivedTime]", True)
+            item = items.GetFirst()
+            for _ in range(_WARM_SAMPLE):
+                if item is None:
+                    break
+                item = items.GetNext()
+        except Exception:
+            continue
+
+
+def _resolve_by_subject(session, subject):
+    """Find the newest item whose Subject matches exactly.
+
+    Subject filters (Items.Restrict) work reliably in sessions where
+    GetItemFromID does not, so this is the dependable escape hatch: pass the
+    subject shown by find/find-recent when the EntryID cannot be opened.
+    """
+    try:
+        namespace = session.namespace or session.outlook.GetNamespace("MAPI")
+    except Exception:
+        return None
+    quoted = str(subject).replace('"', '""')
+    filter_expr = '[Subject] = "' + quoted + '"'
+    for folder_id in _FALLBACK_FOLDER_IDS:
+        try:
+            folder = namespace.GetDefaultFolder(folder_id)
+        except Exception:
+            continue
+        try:
+            items = folder.Items
+            try:
+                items.Sort("[ReceivedTime]", True)
+            except Exception:
+                pass
+            matches = items.Restrict(filter_expr)
+            if matches.Count:
+                print(f"[outlook] resolved by subject in {folder.Name}: {subject[:60]}")
+                return matches.Item(1)
+        except Exception:
+            continue
+    return None
+
+
+def _get_email_item(session, email_id, subject=None):
+    """Get email by ID (optionally by subject when the ID cannot be opened)."""
+    _require_full_entry_id(email_id, subject=subject)
     namespace = session.namespace or session.outlook.GetNamespace("MAPI")
 
     try:
@@ -41,10 +272,39 @@ def _get_email_item(session, email_id):
         except Exception:
             pass
 
+        # Cold-session MAPI quirk: read the store first, then retry the ID.
+        _warm_store(namespace)
+        try:
+            return namespace.GetItemFromID(email_id)
+        except Exception as retry_error:
+            last_error = retry_error
+
+        # Subject lookup is the dependable path in this environment.
+        if subject:
+            found = _resolve_by_subject(session, subject)
+            if found is not None:
+                return found
+
+        # Last resort: walk the well-known folders looking for the EntryID.
+        found = _resolve_by_enumeration(session, email_id)
+        if found is not None:
+            return found
+
         if "moved or deleted" in str(last_error).lower():
             print("Error: Outlook could not resolve the email by its current item handle.")
             print("This can happen after recall, move, or mailbox-store changes.")
             print("Please search for the email again to get a fresh current email ID.")
+        else:
+            length = len(str(email_id).strip())
+            print("Error: Outlook could not open that email ID.")
+            print("ID length received: %d characters." % length)
+            if length < 140:
+                print("A valid Outlook EntryID is about 140 characters. Anything shorter is")
+                print("truncated or short-term (session-scoped) and can never be opened from")
+                print("a new process. Re-copy the full ID from `find`, or use --subject.")
+            print("Tried GetItemFromID (default store + every store), a warmed retry, a")
+            print("subject lookup (only when --subject is given) and a folder scan of")
+            print("Inbox / Sent Items / Drafts / Deleted Items / Outbox.")
 
         raise last_error
 
@@ -318,6 +578,22 @@ def _remove_self_from_recipients(reply, current_user_email):
             to_remove.append(i)
     for i in reversed(to_remove):
         reply.Recipients.Remove(i)
+
+def _copy_sent_items_recipients(email_item, reply, current_user_email, to_only=False):
+    """Copy recipients from a Sent Items email onto a newly created reply item.
+
+    Excludes the current user (who was the sender of the original email).
+    With to_only=True, copies only To (Type 1) recipients — used by --only
+    replies, where the original To recipient is the thread counterpart.
+    """
+    for i in range(1, email_item.Recipients.Count + 1):
+        recip = email_item.Recipients.Item(i)
+        if to_only and getattr(recip, "Type", 1) != 1:  # 1 = olTo
+            continue
+        smtp = _get_smtp_address(recip)
+        if smtp and smtp.lower() != current_user_email.lower():
+            new_recip = reply.Recipients.Add(smtp)
+            new_recip.Type = getattr(recip, "Type", 1) or 1  # 1=To, 2=CC
 
 def _normalize_cc(cc_arg):
     """Normalize args.cc (list from append or single string) into one comma-separated string."""

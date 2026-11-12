@@ -19,10 +19,10 @@ from .common import (
     _bare_subject,
     _build_reply_header,
     _collect_recent_sent_entry_ids,
+    _copy_sent_items_recipients,
     _ensure_utf8_charset,
     _format_forward_message_html,
     _get_email_item,
-    _get_smtp_address,
     _inject_before_body,
     _normalize_cc,
     _preserve_inline_images,
@@ -60,6 +60,12 @@ def cmd_reply(args):
                 if is_sent_items:
                     _reply_step("creating new reply item from Sent Items source")
                     reply = session.outlook.CreateItem(0)
+                    if not args.to:
+                        # Sent Items: --only means replying to the original To
+                        # recipient(s) — the sender of the original was the
+                        # current user, so From cannot provide a counterpart.
+                        _reply_step("copying original TO recipient(s)")
+                        _copy_sent_items_recipients(email_item, reply, current_user_email, to_only=True)
                     _reply_step("adding explicit recipients")
                     _add_recipients(reply, args.to, args.cc)
                     _reply_step("displaying reply item to load signature")
@@ -80,12 +86,7 @@ def cmd_reply(args):
                 _reply_step("creating new reply-all item from Sent Items source")
                 reply = session.outlook.CreateItem(0)
                 _reply_step("copying original recipients")
-                for i in range(1, email_item.Recipients.Count + 1):
-                    recip = email_item.Recipients.Item(i)
-                    smtp = _get_smtp_address(recip)
-                    if smtp and smtp.lower() != current_user_email.lower():
-                        new_recip = reply.Recipients.Add(smtp)
-                        new_recip.Type = recip.Type  # 1=To, 2=CC
+                _copy_sent_items_recipients(email_item, reply, current_user_email)
                 _reply_step("adding explicit recipients")
                 _add_recipients(reply, args.to, args.cc)
                 _reply_step("displaying reply item to load signature")
@@ -303,6 +304,133 @@ def cmd_batch_forward(args):
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
 
+def cmd_batch_compose(args):
+    """Compose and send a brand-new email to many recipients (CSV) as BCC"""
+    if getattr(args, 'body_file', None):
+        try:
+            with open(args.body_file, 'r', encoding='utf-8') as f:
+                args.message = f.read()
+        except OSError as exc:
+            print(f"Error reading body file {args.body_file}: {exc}", file=sys.stderr)
+            return 1
+    elif getattr(args, 'message_base64', None):
+        try:
+            args.message = base64.b64decode(args.message_base64).decode('utf-8')
+        except Exception as exc:
+            print(f"Error: invalid --body-base64 payload: {exc}", file=sys.stderr)
+            return 1
+
+    if not getattr(args, 'message', None):
+        print("Error: No body provided. Use --body-file or --body-base64.", file=sys.stderr)
+        return 1
+
+    cc_normalized = _normalize_cc(getattr(args, 'cc', None))
+    cc_list = [x.strip() for x in cc_normalized.replace(";", ",").split(",")] if cc_normalized else []
+
+    try:
+        # Use configured batch size from backend/config.py
+        batch_size = batch_config.OUTLOOK_BCC_LIMIT
+
+        with OutlookSessionManager() as session:
+            # Read CSV file (handle BOM if present)
+            import csv
+            recipients = []
+            with open(args.csv_path, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    row_lower = {k.lower(): v for k, v in row.items()}
+                    if 'email' in row_lower:
+                        email = row_lower['email'].strip()
+                        if email:
+                            recipients.append(email)
+
+            if not recipients:
+                print("Error: No email addresses found in CSV", file=sys.stderr)
+                return 1
+
+            # Send to recipients in batches (batch size from config file)
+            import time
+            from datetime import datetime, timezone
+            total_sent = 0
+            num_batches = (len(recipients) + batch_size - 1) // batch_size
+            existing_sent_ids = _collect_recent_sent_entry_ids(session, args.subject)
+            send_start_time = datetime.now(timezone.utc)
+
+            for i in range(0, len(recipients), batch_size):
+                batch = recipients[i:i + batch_size]
+                batch_num = i // batch_size + 1
+
+                mail = session.outlook.CreateItem(0)  # 0 = olMailItem
+                mail.Subject = args.subject
+
+                # Display briefly to trigger Outlook signature insertion
+                mail.Display(False)
+                mail.HTMLBody = _ensure_utf8_charset(_wrap_body_font(args.message) + mail.HTMLBody)
+
+                # Add CC recipients (visible to all recipients)
+                for cc_recipient in cc_list:
+                    cc_recip = mail.Recipients.Add(cc_recipient)
+                    cc_recip.Type = 2  # 2 = olCC
+
+                # Add recipients as BCC (to protect privacy)
+                for recipient in batch:
+                    bcc_recip = mail.Recipients.Add(recipient)
+                    bcc_recip.Type = 3  # 3 = olBCC
+
+                # Resolve all recipients before sending
+                mail.Recipients.ResolveAll()
+
+                _set_importance(mail, getattr(args, 'importance', None))
+
+                # Send
+                mail.Send()
+                total_sent += len(batch)
+                print(f"Sent batch {batch_num}/{num_batches}: {len(batch)} recipients")
+
+            print(f"\nTotal recipients: {total_sent}")
+            print(f"Successfully sent new email: {args.subject}")
+
+            # Retrieve EntryIDs for all sent batches
+            bare_subject = _bare_subject(args.subject)
+            threshold = send_start_time - timedelta(seconds=5)
+
+            for attempt in range(15):
+                time.sleep(2)
+                try:
+                    ns = session.outlook.GetNamespace("MAPI")
+                    sent_folder = ns.GetDefaultFolder(5)
+                    items = sent_folder.Items
+                    items.Sort("[SentOn]", True)
+                    found_ids = []
+                    item = items.GetFirst()
+                    while item and len(found_ids) < num_batches:
+                        sent_on = item.SentOn
+                        if hasattr(sent_on, 'astimezone'):
+                            sent_utc = sent_on.astimezone(timezone.utc)
+                        else:
+                            sent_utc = sent_on.replace(tzinfo=timezone.utc)
+                        if sent_utc < threshold:
+                            break
+                        bare_item_subject = _bare_subject(getattr(item, 'Subject', ''))
+                        entry_id = getattr(item, 'EntryID', None)
+                        if entry_id in existing_sent_ids:
+                            item = items.GetNext()
+                            continue
+                        if bare_subject in bare_item_subject and entry_id:
+                            found_ids.append(entry_id)
+                        item = items.GetNext()
+                    if len(found_ids) >= num_batches:
+                        for idx, eid in enumerate(reversed(found_ids), 1):
+                            print(f"EntryID (batch {idx}): {eid}")
+                        break
+                except Exception:
+                    pass
+
+        return 0
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
+
 def cmd_forward(args):
     """Forward an email to specified recipients with optional CC and custom message."""
     if not _resolve_body(args, required=False):
@@ -384,6 +512,34 @@ def cmd_forward(args):
         print(f"Error: {str(e)}", file=sys.stderr)
         return 1
 
+def _filter_inherited_attachments(mail_item, attach_str):
+    """Drop explicitly requested attachments whose filename already exists on the
+    item (redirect/forward inherits the source email's attachments, so attaching
+    the same file again would send a duplicate)."""
+    if not attach_str:
+        return attach_str
+    import os
+
+    existing = set()
+    try:
+        for i in range(1, mail_item.Attachments.Count + 1):
+            existing.add(str(mail_item.Attachments.Item(i).FileName).lower())
+    except Exception:
+        return attach_str
+
+    kept = []
+    for filepath in attach_str.split(","):
+        filepath = filepath.strip().strip('"')
+        if not filepath:
+            continue
+        name = os.path.basename(filepath).lower()
+        if name in existing:
+            print(f"[redirect] skipped duplicate attachment already inherited from the original email: {os.path.basename(filepath)}")
+            continue
+        kept.append(filepath)
+    return ",".join(kept)
+
+
 def cmd_redirect(args):
     """Redirect an email: clear all recipients, add new TO/CC, preserve original body."""
     if not _resolve_body(args):
@@ -397,6 +553,11 @@ def cmd_redirect(args):
             while forward.Recipients.Count > 0:
                 forward.Recipients.Remove(1)
 
+            # Remove attachments inherited from the original email if requested
+            if getattr(args, "no_attachments", False):
+                while forward.Attachments.Count > 0:
+                    forward.Attachments.Remove(1)
+
             # Add new recipients
             _add_recipients(forward, args.to, args.cc)
 
@@ -404,9 +565,12 @@ def cmd_redirect(args):
                 print("Error: No recipients specified. Use --to or --cc.")
                 return 1
 
-            # Subject
+            # Set subject: use --subject override or default FW: prefix
             original_subject = str(getattr(email_item, "Subject", "No Subject"))
-            forward.Subject = f"FW: {original_subject}" if not original_subject.startswith("FW:") else original_subject
+            if getattr(args, "subject", None):
+                forward.Subject = args.subject
+            else:
+                forward.Subject = f"FW: {original_subject}" if not original_subject.startswith("FW:") else original_subject
 
             # Signature + body
             forward.Display(False)
@@ -417,7 +581,7 @@ def cmd_redirect(args):
             final_subject = forward.Subject
 
             _add_inline_images(forward, args.inline_image)
-            _add_attachments(forward, args.attach)
+            _add_attachments(forward, _filter_inherited_attachments(forward, args.attach))
             sent_before_ids = _collect_recent_sent_entry_ids(session, final_subject)
             from datetime import datetime, timezone
             send_start_time = datetime.now(timezone.utc)

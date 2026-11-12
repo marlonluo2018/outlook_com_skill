@@ -19,15 +19,15 @@ triggers: [
   "accept meeting", "decline meeting", "tentative", "propose new time",
   "check availability", "check calendar", "free busy", "freebusy", "is available", "check schedule", "find time", "others calendar", "colleague calendar",
 ]
-operations: ["find-recent", "find", "compose", "reply", "forward", "redirect", "batch-forward", "download-attachment", "contact-lookup", "find-thread", "find-related", "get-email", "recall", "get-html", "edit-html", "send-draft", "get-signature", "update-signature", "list-calendar", "respond-meeting", "check-availability"]
+operations: ["find-recent", "find", "compose", "reply", "forward", "redirect", "batch-forward", "batch-compose", "download-attachment", "contact-lookup", "find-thread", "find-related", "get-email", "recall", "get-html", "edit-html", "send-draft", "get-signature", "update-signature", "list-calendar", "respond-meeting", "check-availability"]
 ---
 
 # Outlook Skill
 
 > **⚠️ ALL emails use HTML format:** `<br>` for line breaks (avoid stacked `<p>` — Outlook adds large gaps), `<strong>bold</strong>`
-> **Send commands send immediately.** Run them only after the user approved the draft (Send Flow in `assistant_brain/workflows/EMAIL_WORKFLOW.md`).
-> **⚠️ No closing or signature in email body** — Outlook auto-appends signature. Do not add "Thanks, Marlon" or similar.
-> **Codex execution:** Outlook COM requires the interactive Outlook desktop session. In Codex, run Outlook-backed commands with desktop/elevated execution directly; do not try the background sandbox first.
+> **Send commands send immediately.** Run them only after the user has approved the draft — an explicit approval of the draft itself ("approve and send" / "同意发送"). An answer to a side question about the draft (recipients, wording, cc list) is NOT approval — re-present the updated draft and wait for the explicit go. Follow your host's approval workflow if one exists.
+> **⚠️ No closing or signature in email body** — Outlook auto-appends the user's signature. Do not add "Thanks, ..." or similar.
+> **Desktop session required:** Outlook COM needs the interactive desktop session with Outlook running — run commands in the desktop context, not a background sandbox or service.
 
 ## Terminology
 
@@ -48,9 +48,39 @@ py -3 scripts/outlook_skill.py find-recent --days 7 --json
 ```
 - Default: **Inbox + Sent Items** (searches both folders to capture full context)
 - Shows: To/CC, attachments, body preview, folder indicator (📥/📤)
+- **Meeting items are marked** (📅 Meeting Invite / ✅ Accepted / ❌ Declined / 📅 Tentative / 📅 Meeting Update / ❌ Canceled / 📅 Event) with the meeting time shown as `When: <start> ~ <end>` — calendar invites are NOT plain emails; don't treat them as thread replies
 - `--days`: 1-365 (default: 7)
 - `--folder`: override to search a single folder only
 - `--json`: stable machine-readable output including both `entry_id` and `conversation_id`
+
+### Never copy an EntryID by hand
+
+An EntryID is ~140 characters. There are two failure modes when an ID is retyped, and both are silent until `Could not open the item`:
+
+1. **Model hallucination (primary):** an LLM asked to reproduce a long opaque identifier regenerates it token-by-token and can drop characters — observed with DeepSeek V4 regressing a 160-char EntryID to 90 chars. This applies to any model, including the current session model.
+2. **Terminal wrapping (secondary):** hand-copied IDs from wrapped console output are truncated.
+
+**Reference emails instead of pasting their IDs — the CLI resolves the ID internally. Prefer these over raw EntryIDs in ALL cases:**
+
+```bash
+# 1) by row number from the last find (recommended)
+outlook_skill.py find --from "dasha" --limit 3
+outlook_skill.py get-email --pick 2      # '2' is all you type
+outlook_skill.py get-email --last        # newest row of that result set
+
+# 2) by the marker recorded in a task file
+outlook_skill.py get-email --task T123         # newest email marker in that task
+outlook_skill.py get-email --task T123 --pick 3  # the 3rd marker, oldest→newest
+
+# 3) by exact subject (when the ID is stale or the email moved)
+outlook_skill.py get-email --subject "FW: Q2 '26 Training Planning Kick Off"
+```
+
+`find` (and `find-recent`) write their result set to `last-find.json` (under the host cache dir — see Configuration), which is what `--pick` / `--last` read. The cache holds only the most recent result set, so every `--pick` / `--last` echoes its provenance — e.g. `using find result #3/5 from `find --from 'fei ye' --days 7` (2 min ago)` — and warns ⚠ when the cache is over an hour old. If the provenance line shows a different command than you expected, re-run `find` before trusting the row. Task-file markers are written by host tooling (e.g. a sync script), never typed by hand.
+
+Short IDs (< ~140 characters) are **rejected immediately with an error before Outlook is even contacted** — a truncated or hallucinated copy can never be opened, so don't retry it; re-run `find` and use the reference commands above.
+
+**When a raw EntryID must be used anyway** (e.g. batch `get-email` of several messages): copy it verbatim from a file Read in the same turn (task-file markers, sync results) — never from memory of earlier terminal output — and treat a short-ID failure report as a signal to fall back to the reference commands above.
 
 ### Find Emails
 ```bash
@@ -126,30 +156,34 @@ py -3 scripts/outlook_skill.py lookup-contact "HONG YANG"
 - **Why:** Outlook search by email address unreliable; use display name instead
 - **Name lookup:** Resolves display names against Exchange Global Address List
 
-### Sending Strategy (AI auto-selects — never ask user)
+### Sending Strategy (follows the user's words — never ask user)
 
-`reply` cannot remove recipients — its `--to`/`--cc` only append. Compare the source To/CC (from `get-email`) with the intended list and pick:
+Command selection is driven by what the user said, not by an inferred audience analysis. `reply` cannot remove recipients — its `--to`/`--cc` only append:
 
-| Need | Command |
-| ---- | ------- |
-| Same/more recipients | `reply` |
-| Sender only | `reply --only` |
-| Remove or replace some recipients, keep the thread | `redirect` |
-| New audience that needs thread context | `forward` |
-| No thread context needed | `compose` with `Re:` subject |
+| The user says | Command |
+| -------------- | ------- |
+| "回复" / "reply" (no recipient named) | `reply` — everyone in To + CC |
+| "只回发件人" / names the sender alone | `reply --only` |
+| "回复给 X" (only X, others dropped, keep thread) | `redirect --to X` |
+| "回复时加上/抄送 X" | `reply --to X` / `reply --cc X` |
+| "转发给 X" (new audience, needs thread context) | `forward` |
+| New topic, no thread context | `compose` with `Re:` subject |
+
+**Default wide:** an unqualified "回复" always replies to all To + CC — never downgrade to `--only` or drop recipients based on the reply's content. Narrowing requires the user's explicit words.
 
 ### Body Transport (all send commands)
 
-Write the HTML body with the Write tool to a new, uniquely named file in `outbox/`, then pass `--body-file`. Never put body text inside a shell command string — Bash/PowerShell expand `$60` etc. before the script sees it. After a successful send the CLI deletes the file (only files inside `outbox/`); on failure it is kept for retry. Use `<br>` for line breaks rather than `<p>` blocks.
+Write the HTML body to a new, uniquely named file in the outbox directory (`OUTLOOK_SKILL_OUTBOX_DIR`; default `<host>/outbox`, standalone `.outlook-skill/outbox`), then pass `--body-file`. Never put body text inside a shell command string — Bash/PowerShell expand `$60` etc. before the script sees it. **Inside the body file, write dollar amounts with a plain `$` — do not escape it as `\$`; the escape renders literally in the sent email.** After a successful send the CLI deletes the file (only files inside the outbox dir); on failure it is kept for retry. Use `<br>` for line breaks rather than `<p>` blocks.
 
 ### Reply
 
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<email_id>" --body-file "outbox/T127-reply-20260924.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
+py -3 scripts/outlook_skill.py reply "<email_id>" --body-file "outbox/reply-20260924.html" --cc "extra@ibm.com" --attach "C:/path/file.pdf"
 ```
 
 - **Default: reply-all** — keeps ALL original To + CC recipients. `--to`/`--cc` APPEND to existing.
-- **`--only`: reply to From (sender) only** — AI selects this when the response is for the sender alone.
+- **`--only`: reply to From (sender) only** — used when the user's words name the sender alone ("只回发件人"/"回复给他").
+- **Sent Items source:** when replying to your own sent email (a follow-up on a thread you started), recipients are rebuilt from the original email — `--only` goes to the original To recipient(s), reply-all to the original To + CC. No manual `--to` needed.
 - `--attach`: File path(s) to attach (comma separated for multiple).
 - `--importance`: Set priority flag (`high` or `low`) — shows ❗ in recipient's inbox.
 - `reply` logs progress steps to stderr for timeout diagnosis.
@@ -158,7 +192,7 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py reply "<
 ### Compose Email
 
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "outbox/<name>.html" --attach "C:/path/file.pdf"
+py -3 scripts/outlook_skill.py compose --to "email@ibm.com" --subject "text" --body-file "outbox/<name>.html" --attach "C:/path/file.pdf"
 ```
 
 - `--attach`: File path(s) to attach (comma separated for multiple)
@@ -169,8 +203,8 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose 
 ### Forward (single)
 
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py forward "<email_id>" --to "user1@ibm.com" --cc "manager@ibm.com" --body-file "outbox/<name>.html"
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py forward "<email_id>" --to "user@domain.com" --attach "C:/path/file.pdf"
+py -3 scripts/outlook_skill.py forward "<email_id>" --to "user1@ibm.com" --cc "manager@ibm.com" --body-file "outbox/<name>.html"
+py -3 scripts/outlook_skill.py forward "<email_id>" --to "user@domain.com" --attach "C:/path/file.pdf"
 ```
 
 - Forwards an email to specified recipients
@@ -184,7 +218,7 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py forward 
 ### Batch Forward
 
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py batch-forward "<email_id>" "recipients.csv" --body-file "outbox/<name>.html"
+py -3 scripts/outlook_skill.py batch-forward "<email_id>" "recipients.csv" --body-file "outbox/<name>.html"
 ```
 
 - CSV: single column named "email" (supports BOM encoding)
@@ -194,10 +228,24 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py batch-fo
 - Automatically splits large recipient lists into batches
 - **Batch size:** Configured in [`backend/config.py`](backend/config.py) (default: 500)
 
+### Batch Compose (new email to a CSV list)
+
+```bash
+py -3 scripts/outlook_skill.py batch-compose "recipients.csv" --subject "text" --body-file "outbox/<name>.html"
+```
+
+- Sends a **brand-new email** (no forwarded original) to a CSV recipient list
+- CSV: single column named "email" (supports BOM encoding)
+- Uses BCC for privacy; automatically splits large recipient lists into batches (same `OUTLOOK_BCC_LIMIT` as batch-forward)
+- `--cc "a@ibm.com,b@ibm.com"`: CC recipients (visible to all), added to every batch
+- `--importance {high,low}`: Set priority flag
+- Loads the Outlook signature automatically (same as `compose`)
+- Prints the Sent Items EntryID per batch
+
 ### Redirect (Clear Recipients + New TO/CC)
 
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py redirect "<email_id>" --to "a@b.com" --cc "b@b.com" --body-file "outbox/<name>.html"
+py -3 scripts/outlook_skill.py redirect "<email_id>" --to "a@b.com" --cc "b@b.com" --body-file "outbox/<name>.html"
 ```
 
 - Clears all existing TO and CC recipients, then adds new ones
@@ -205,7 +253,9 @@ py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py redirect
 - `--body-file`: HTML message prepended above original content (see Body Transport)
 - `--to` (required): New TO recipients (comma separated)
 - `--cc`: New CC recipients (comma separated)
-- `--attach`: File path(s) to attach (comma separated)
+- `--attach`: File path(s) to attach (comma separated). **Attachments inherited from the original email are preserved; files whose name already exists among them are skipped** (no duplicates). Use absolute paths — Outlook COM does not resolve relative paths.
+- `--no-attachments`: Remove any attachments inherited from the original email
+- `--subject`: Override the subject (default: auto-prefixed `FW: <original>`; pass the exact subject you presented in the draft to avoid a mismatch)
 - Use when inherited recipients must be removed or replaced while keeping the thread
 
 ### Recall Sent Email
@@ -241,7 +291,7 @@ py -3 scripts/outlook_skill.py get-email "<email_id>" --truncate 1000
 - **Batch retrieval:** Supports passing multiple email IDs separated by spaces to print them sequentially in one run.
 - `--truncate N`: Truncate the printed body text to `N` characters to save terminal output and optimize context window/tokens.
 - Use after search/thread/related to read the actual content.
-- **Embedded images:** Auto-extracted to `<repo>/downloads/outlook_inline/<id>\` (gitignored; reused on re-read, folders older than 14 days pruned automatically). Paths printed in output — use Read tool to view. Never stored in the OS temp dir.
+- **Embedded images:** Auto-extracted to `outlook_inline/<id>/` under the downloads dir (`OUTLOOK_SKILL_DOWNLOADS_DIR`; default `<host>/downloads`, standalone `.outlook-skill/downloads`) — gitignored; reused on re-read, folders older than 14 days pruned automatically. Paths printed in output — use Read tool to view. Never stored in the OS temp dir.
 
 ### Get Email HTML (Template Editing — Step 1: Read)
 ```bash
@@ -314,7 +364,7 @@ powershell -Command "Get-Process outlook -ErrorAction SilentlyContinue | Stop-Pr
 py -3 scripts/outlook_skill.py list-calendar                             # today
 py -3 scripts/outlook_skill.py list-calendar --days 7                    # next 7 days
 py -3 scripts/outlook_skill.py list-calendar --start "2026-06-23" --end "2026-06-30"
-py -3 scripts/outlook_skill.py list-calendar --user "xuhuanxh@cn.ibm.com" --date "2026-09-28"
+py -3 scripts/outlook_skill.py list-calendar --user "colleague@example.com" --date "2026-09-28"
 ```
 - Shows appointments grouped by date: time range, subject, location, organizer, response status
 - `--days`: Number of days ahead (default: 1 = today only)
@@ -365,7 +415,7 @@ py -3 scripts/outlook_skill.py respond-meeting "<meeting_entry_id>" --action pro
 
 ### Sending Inline Images
 ```bash
-py -3 assistant_brain/skills/outlook_com_skill/scripts/outlook_skill.py compose --to "email" --subject "text" --body-file "outbox/<name>.html" --inline-image "C:/path/image.png:myimage"
+py -3 scripts/outlook_skill.py compose --to "email" --subject "text" --body-file "outbox/<name>.html" --inline-image "C:/path/image.png:myimage"
 ```
 - `--inline-image`: Format is `filepath:cid_name` (comma separated for multiple)
 - Reference in HTML body via `<img src="cid:cid_name">`
@@ -382,6 +432,19 @@ No extra user command needed — AI handles download + viewing transparently.
 ## Configuration
 
 All configuration is centralized in [`backend/config.py`](backend/config.py).
+
+### Host-project integration (paths)
+
+Every path that assumes a host layout is overridable via environment variables. Inside a host project (detected by an `assistant_brain` directory above the skill, e.g. BrainClaw) the defaults follow the host layout; **standalone runs fall back to a self-contained `.outlook-skill/` directory inside the skill repo** — no configuration needed:
+
+| Env var | Purpose | Default (host / standalone) |
+|---------|---------|------------------------------|
+| `OUTLOOK_SKILL_CACHE_DIR` | find-result cache (`last-find.json`) | `<host>/assistant_brain/sync_results` · `.outlook-skill/cache` |
+| `OUTLOOK_SKILL_TASKS_DIR` | task files scanned by `--task T###` for `<!-- email:... -->` markers | `<host>/assistant_brain/tasks` · `.outlook-skill/tasks` |
+| `OUTLOOK_SKILL_OUTBOX_DIR` | body files (`--body-file`), removed after a successful send | `<host>/outbox` · `.outlook-skill/outbox` |
+| `OUTLOOK_SKILL_DOWNLOADS_DIR` | attachments and extracted inline images | `<host>/downloads` · `.outlook-skill/downloads` |
+
+`--task` accepts any `.md` path directly (any markdown file containing `<!-- email:... -->` markers), so marker-based referencing works without the env var too.
 
 **To change batch size:**
 Edit `backend/config.py` and modify:
@@ -443,11 +506,7 @@ py -3 scripts/outlook_skill.py find-related "<entry_id>"
 
 ## Custom Folders
 
-| Folder | Path | Purpose |
-|--------|------|---------|
-| Recognized | `luomn@cn.ibm.com/Inbox/Recognized` | Thanks@IBM recognition emails |
-
-**Note:** `move-email` cannot resolve subfolder names alone (e.g., `"Recognized"` fails). Always use the full mailbox path: `luomn@cn.ibm.com/Inbox/FolderName`.
+Folder operations (`move-email` etc.) cannot resolve subfolder names alone — a bare `"FolderName"` fails. Always use the full mailbox path, e.g. `<your-email>/Inbox/<FolderName>`. Run `list-folders` first to discover the exact paths in the mailbox.
 
 ## Requirements
 

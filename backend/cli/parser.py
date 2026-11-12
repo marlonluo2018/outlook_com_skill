@@ -15,6 +15,7 @@ from .folder_commands import (
     cmd_remove_folder,
 )
 from .mail_commands import (
+    cmd_batch_compose,
     cmd_batch_forward,
     cmd_compose,
     cmd_forward,
@@ -44,7 +45,7 @@ from .template_commands import cmd_edit_html
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Outlook Skill for BrainClaw - Email Management CLI')
+    parser = argparse.ArgumentParser(description='Outlook Skill - Email Management CLI')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
     # List folders command
@@ -88,6 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser_get_email = subparsers.add_parser('get-email', aliases=['read'], help='Get full email details by ID')
     parser_get_email.add_argument('email_ids', nargs='*', default=[], help='One or more Email IDs from search results')
     parser_get_email.add_argument('--id', dest='email_id_flag', help='Email ID (alternative to positional)')
+    parser_get_email.add_argument('--subject', help='Exact subject from find output — used to locate the email when the EntryID cannot be opened in this Outlook session')
+    parser_get_email.add_argument('--pick', type=int, help='Row number from the last find result set (1-based) — avoids copying an EntryID')
+    parser_get_email.add_argument('--last', action='store_true', help='Use the last row of the last find result set')
+    parser_get_email.add_argument('--task', help='Task ID or file (e.g. T152) — resolves the email marker recorded in that task file')
     parser_get_email.add_argument('--fields', help='Comma-separated fields to show (from,to,cc,subject,date,body)')
     parser_get_email.add_argument('--truncate', type=int, default=None, help='Truncate the email body to N characters')
     parser_get_email.add_argument('--latest-only', '-l', action='store_true', help='Show only the latest message body, excluding quoted thread history')
@@ -156,8 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser_redirect.add_argument('--body-file', help='Path to file containing the HTML body')
     parser_redirect.add_argument('--to', required=True, help='To recipients (comma separated)')
     parser_redirect.add_argument('--cc', action='append', help='CC recipients (comma separated or repeated)')
-    parser_redirect.add_argument('--attach', help='File path(s) to attach (comma separated)')
+    parser_redirect.add_argument('--attach', help='File path(s) to attach (comma separated; duplicates of attachments inherited from the original email are skipped)')
     parser_redirect.add_argument('--inline-image', help='Image path(s) to embed inline in body (comma separated)')
+    parser_redirect.add_argument('--subject', help='Override the subject (default: FW: <original>)')
+    parser_redirect.add_argument('--no-attachments', action='store_true', help='Remove any attachments inherited from the original email')
     parser_redirect.set_defaults(func=cmd_redirect)
 
     # Batch forward command
@@ -169,6 +176,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser_batch.add_argument('--message-base64', dest='message_base64', help='Alias for --body-base64')
     parser_batch.add_argument('--body-file', help='Path to file containing the custom HTML message')
     parser_batch.set_defaults(func=cmd_batch_forward)
+
+    # Batch compose command (new email to CSV recipients via BCC)
+    parser_batch_compose = subparsers.add_parser('batch-compose', help='Compose and send a new email to many recipients (CSV) as BCC')
+    parser_batch_compose.add_argument('csv_path', help='Path to CSV file with email addresses (column: email)')
+    parser_batch_compose.add_argument('--subject', required=True, help='Email subject')
+    parser_batch_compose.add_argument('--body-base64', dest='message_base64', help='Base64 encoded UTF-8 HTML body')
+    parser_batch_compose.add_argument('--message-base64', dest='message_base64', help='Alias for --body-base64')
+    parser_batch_compose.add_argument('--body-file', help='Path to file containing the HTML body')
+    parser_batch_compose.add_argument('--cc', action='append', help='CC recipients (comma separated or repeated)')
+    parser_batch_compose.add_argument('--importance', choices=['high', 'low'], help='Set email importance (high or low)')
+    parser_batch_compose.set_defaults(func=cmd_batch_compose)
     
     # Create folder command
     parser_create_folder = subparsers.add_parser('create-folder', help='Create a new folder')

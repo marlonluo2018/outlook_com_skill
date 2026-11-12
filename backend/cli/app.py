@@ -7,12 +7,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Optional
 
+from backend.config import HostPathConfig
+
 from .parser import build_parser
 from .runtime import _run_outlook_command_isolated, _should_isolate_outlook_command
 
 # Temporary email bodies live here and are removed after a successful send.
-OUTBOX_DIR = Path(__file__).resolve().parents[5] / "outbox"
-SEND_COMMANDS = {"reply", "compose", "forward", "redirect", "batch-forward"}
+OUTBOX_DIR = HostPathConfig.outbox_dir()
+SEND_COMMANDS = {"reply", "compose", "forward", "redirect", "batch-forward", "batch-compose"}
 
 
 def _cleanup_outbox_body(args) -> None:

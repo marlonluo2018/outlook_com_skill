@@ -1,4 +1,4 @@
-﻿"""CLI runtime safeguards for Outlook COM commands."""
+"""CLI runtime safeguards for Outlook COM commands."""
 
 from __future__ import annotations
 
@@ -15,6 +15,11 @@ try:
 except ImportError:  # pragma: no cover - this Outlook skill is Windows-only
     msvcrt = None
 
+try:
+    from backend.integrity import is_low_integrity
+except ImportError:  # pragma: no cover - direct package-relative import
+    from ..integrity import is_low_integrity
+
 
 OUTLOOK_SKILL_CHILD_ENV = "OUTLOOK_SKILL_CHILD"
 OUTLOOK_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OUTLOOK_SKILL_LOCK_TIMEOUT", "30"))
@@ -27,6 +32,7 @@ OUTLOOK_COMMAND_TIMEOUTS = {
     "redirect": 90,
     "send-draft": 90,
     "batch-forward": 300,
+    "batch-compose": 300,
     "recall": 90,
     "respond-meeting": 90,
     "download-attachment": 120,
@@ -99,11 +105,37 @@ def _timeout_for_command(args) -> int:
         return max(int(requested), 1)
     return OUTLOOK_COMMAND_TIMEOUTS.get(args.command, OUTLOOK_DEFAULT_TIMEOUT_SECONDS)
 
+LOW_INTEGRITY_HINT = (
+    "This process is running at Low integrity (a sandboxed/non-elevated tool context). "
+    "Windows blocks cross-integrity Outlook COM calls, so Outlook instead tries to start a "
+    "second instance and shows a modal dialog, which blocks the command until it times out "
+    "and leaves that dialog on the desktop.\n"
+    "Run this command from the interactive desktop session (Medium integrity) instead, then "
+    "dismiss any 'Only one version of Outlook can run at a time' dialog."
+)
+
+def _outlook_preflight_error() -> str | None:
+    """Return an actionable error when this process cannot drive Outlook COM at all."""
+    if os.environ.get("OUTLOOK_SKILL_IGNORE_INTEGRITY") == "1":
+        return None
+    try:
+        if is_low_integrity():
+            return LOW_INTEGRITY_HINT
+    except Exception:  # pragma: no cover - never block on the guard itself
+        return None
+    return None
+
 def _run_outlook_command_isolated(args) -> int:
     """Run the command in a child process so blocking COM calls can be terminated."""
     timeout_seconds = _timeout_for_command(args)
     env = os.environ.copy()
     env[OUTLOOK_SKILL_CHILD_ENV] = "1"
+
+    preflight_error = _outlook_preflight_error()
+    if preflight_error:
+        print(f"Error: cannot reach Outlook COM from this process.", file=sys.stderr)
+        print(preflight_error, file=sys.stderr)
+        return 125
 
     entrypoint = Path(__file__).resolve().parents[2] / "scripts" / "outlook_skill.py"
     command = [sys.executable, str(entrypoint), *sys.argv[1:]]

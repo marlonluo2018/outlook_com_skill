@@ -73,6 +73,45 @@ def _build_body_preview(body_text: str) -> str:
         preview = preview[:max_preview_length].rstrip() + "..."
     return preview
 
+def _meeting_badge(email_data) -> str:
+    """Return a meeting-item indicator, or "" for plain emails.
+
+    MessageClass is the primary signal (covers the organizer's Sent Items
+    invite copies, whose MeetingStatus is empty); MeetingStatus is the
+    fallback; subject/sender heuristics catch marketing "event" mail.
+    """
+    message_class = (email_data.get('message_class') or '').lower()
+    if message_class.startswith('ipm.schedule.meeting.request'):
+        return " 📅 Meeting Invite"
+    if message_class.startswith('ipm.schedule.meeting.canceled'):
+        return " ❌ Canceled"
+    if message_class.startswith('ipm.schedule.meeting.resp.pos'):
+        return " ✅ Accepted"
+    if message_class.startswith('ipm.schedule.meeting.resp.neg'):
+        return " ❌ Declined"
+    if message_class.startswith('ipm.schedule.meeting.resp.tent'):
+        return " 📅 Tentative"
+    if message_class.startswith('ipm.schedule.meeting'):
+        return " 📅 Meeting Update"
+    meeting = email_data.get('meeting_status', '')
+    if meeting == "meeting_request":
+        return " 📅 Meeting Invite"
+    if meeting == "meeting_canceled":
+        return " ❌ Canceled"
+    if meeting == "meeting":
+        return " 📅 Meeting"
+    # Fast check: subject + sender heuristics (no body access)
+    subj_lower = (email_data.get('subject') or '').lower()
+    sender_lower = (email_data.get('sender') or '').lower()
+    event_sender_kw = ('events', 'calendar', 'webinar', 'noreply')
+    event_subj_kw = ('webinar', 'join us', 'register now', 'you are invited',
+                     "you're invited", 'invitation', 'save the date',
+                     'live event', 'virtual event')
+    if any(kw in sender_lower for kw in event_sender_kw) or \
+       any(kw in subj_lower for kw in event_subj_kw):
+        return " 📅 Event"
+    return ""
+
 def _display_email_list(emails, show_folder=True):
     """Display formatted email list with folder markers."""
     def extract_display_name(recipient_string):
@@ -91,25 +130,7 @@ def _display_email_list(emails, show_folder=True):
         folder_name = email_data.get('folder', '')
         folder_indicator = f" {_folder_emoji(folder_name)} {folder_name}" if show_folder and folder_name else ""
 
-        meeting = email_data.get('meeting_status', '')
-        meeting_icon = ""
-        if meeting == "meeting_request":
-            meeting_icon = " 📅 Meeting Invite"
-        elif meeting == "meeting_canceled":
-            meeting_icon = " ❌ Canceled"
-        elif meeting == "meeting":
-            meeting_icon = " 📅 Meeting"
-        elif not meeting:
-            # Fast check: subject + sender heuristics (no body access)
-            subj_lower = (email_data.get('subject') or '').lower()
-            sender_lower = (email_data.get('sender') or '').lower()
-            event_sender_kw = ('events', 'calendar', 'webinar', 'noreply')
-            event_subj_kw = ('webinar', 'join us', 'register now', 'you are invited',
-                             "you're invited", 'invitation', 'save the date',
-                             'live event', 'virtual event')
-            if any(kw in sender_lower for kw in event_sender_kw) or \
-               any(kw in subj_lower for kw in event_subj_kw):
-                meeting_icon = " 📅 Event"
+        meeting_icon = _meeting_badge(email_data)
 
         print(f"Email #{idx}{folder_indicator}{meeting_icon}")
         print(f"{'='*80}")
@@ -157,6 +178,16 @@ def _display_email_list(emails, show_folder=True):
                 print(f"CC: {'; '.join(cc_list)}")
 
         print(f"Received: {received}")
+
+        # Meeting time for calendar items (extraction fills start/end for
+        # IPM.Schedule.* items and MeetingStatus-flagged mail)
+        start_time = email_data.get('start_time', '')
+        end_time = email_data.get('end_time', '')
+        if start_time and meeting_icon:
+            if end_time:
+                print(f"When: {start_time} ~ {end_time}")
+            else:
+                print(f"When: {start_time}")
 
         # Show confidence/strategy for related search
         confidence = email_data.get('_confidence')
@@ -269,5 +300,6 @@ def _display_email_list_brief(emails, show_folder=True):
             stars_str = f" {stars}"
 
         recipients_str = _format_recipients_brief(email_data)
-        print(f"# {idx}{folder_tag} {received} | {sender:<20} | {subject}{stars_str}")
+        badge = _meeting_badge(email_data)
+        print(f"# {idx}{folder_tag}{badge} {received} | {sender:<20} | {subject}{stars_str}")
         print(f"  {recipients_str}  ID: {email_id}")

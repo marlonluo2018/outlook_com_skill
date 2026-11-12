@@ -13,6 +13,7 @@ EXPECTED_COMMANDS = {
     "forward",
     "redirect",
     "batch-forward",
+    "batch-compose",
     "create-folder",
     "remove-folder",
     "move-email",
@@ -76,6 +77,32 @@ def test_reply_repeated_cc_is_preserved_for_normalization():
     )
 
     assert args.cc == ["a@example.com", "b@example.com"]
+
+
+def test_redirect_subject_override():
+    args = build_parser().parse_args(
+        ["redirect", "entry-id", "--to", "a@example.com", "--subject", "RE: original topic"]
+    )
+
+    assert args.subject == "RE: original topic"
+    assert args.to == "a@example.com"
+
+
+def test_redirect_subject_defaults_to_none():
+    args = build_parser().parse_args(["redirect", "entry-id", "--to", "a@example.com"])
+
+    assert args.subject is None
+
+
+def test_redirect_no_attachments_flag():
+    args = build_parser().parse_args(
+        ["redirect", "entry-id", "--to", "a@example.com", "--no-attachments"]
+    )
+
+    assert args.no_attachments is True
+
+    args = build_parser().parse_args(["redirect", "entry-id", "--to", "a@example.com"])
+    assert args.no_attachments is False
 
 
 def test_check_availability_parser_options():
